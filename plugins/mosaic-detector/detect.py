@@ -23,6 +23,9 @@ def stash_query(query, variables=None):
         payload['variables'] = variables
     try:
         res = requests.post(STASH_URL, json=payload, headers=headers, timeout=30)
+        # 400エラーが出た場合、何が原因か詳細を表示
+        if res.status_code == 400:
+            sys.stderr.write(f"GraphQL Detail: {res.text}\n")
         return res.json().get('data')
     except Exception as e:
         sys.stderr.write(f"Query Failed: {e}\n")
@@ -43,7 +46,7 @@ def is_mosaic(path):
         return False
 
 def main():
-    sys.stderr.write("--- Starting Mosaic Detector (Field Fixed) ---\n")
+    sys.stderr.write("--- Starting Mosaic Detector (Dynamic Field) ---\n")
     
     # 1. タグID取得
     data = stash_query('{ allTags { id name } }')
@@ -53,22 +56,29 @@ def main():
         sys.stderr.write(f"Error: タグ '{TARGET_TAG}' を作成してください。\n")
         return
 
-    # 2. 画像リスト取得（path を paths に修正）
-    # paths はリストで返ってくるため、その中の screenshot または stream を取得します
-    i_data = stash_query('{ allImages { id paths { screenshot } } }')
+    # 2. 【変更】最も確実な ID と Path だけを取得
+    # 'path' がダメなら、Stashの公式ドキュメントで推奨される最小構成を試します
+    print("Fetching image list...")
+    i_data = stash_query('{ allImages { id path } }') # ← もしここで再度400なら、'path' を消してテスト
+    
+    if not i_data:
+        # 万が一 'path' がダメな時のためのバックアップ
+        sys.stderr.write("Retrying with fallback schema...\n")
+        i_data = stash_query('{ allImages { id } }')
+    
     if not i_data: return
     images = i_data.get('allImages', [])
-    
     sys.stderr.write(f"Scanning {len(images)} images...\n")
 
     # 3. 解析
     for img in images:
         img_id = img['id']
-        # paths.screenshot がファイルのフルパスを指していることが多いです
-        path = img.get('paths', {}).get('screenshot')
-
+        # 'path' が存在しない、あるいは None の場合の処理
+        path = img.get('path')
+        
+        # ログを出しすぎると重くなるので、見つけた時だけ表示
         if is_mosaic(path):
-            sys.stderr.write(f"Detected: {os.path.basename(path)}\n")
+            sys.stderr.write(f"Found Mosaic: {os.path.basename(path)}\n")
             stash_query('''
                 mutation($id: ID!, $tags: [ID!]) {
                     imageUpdate(input: { id: $id, tag_ids: $tags }) { id }
