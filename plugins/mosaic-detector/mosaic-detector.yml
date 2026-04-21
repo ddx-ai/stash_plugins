@@ -1,7 +1,7 @@
 name: Mosaic Detector
 description: 全面モザイクや格子状パターンを自動検出し、タグを付与します。
 version: 1.0
-url: https://github.com/あなたのユーザー名/リポジトリ名
+url: https://github.com/ddx-ai/stash_plugins
 # 実行コマンド。PDMがインストールしたライブラリを使えるよう python を指定
 exec:
   - python
