@@ -4,7 +4,7 @@ import numpy as np
 import os
 import sys
 
-# 通信チャネル保護（標準出力をエラー出力へ）
+# 通信チャネル保護
 class Logger(object):
     def write(self, message):
         sys.stderr.write(message)
@@ -22,9 +22,8 @@ def stash_query(query, variables=None):
     if variables:
         payload['variables'] = variables
     try:
-        res = requests.post(STASH_URL, json=payload, headers=headers, timeout=60)
-        if res.status_code != 200:
-            return None
+        # IDリスト取得は時間がかかるためタイムアウトを長く
+        res = requests.post(STASH_URL, json=payload, headers=headers, timeout=120)
         return res.json().get('data')
     except:
         return None
@@ -44,7 +43,7 @@ def is_mosaic(path):
         return False
 
 def main():
-    sys.stderr.write("--- Starting Paginated Image Scan (120k+) ---\n")
+    sys.stderr.write("--- Starting Robust Scan (120k Images) ---\n")
     
     # 1. タグID取得
     data = stash_query('{ allTags { id name } }')
@@ -53,58 +52,44 @@ def main():
         sys.stderr.write(f"Error: タグ '{TARGET_TAG}' を作成してください。\n")
         return
 
-    # 2. ページネーションで500件ずつ取得
-    page = 1
-    per_page = 500 
-    total_processed = 0
+    # 2. 【実績あり】全IDだけを一括取得
+    sys.stderr.write("Step 1: Fetching all image IDs (this will work)...\n")
+    all_data = stash_query('{ allImages { id } }')
+    if not all_data:
+        sys.stderr.write("Failed to fetch ID list.\n")
+        return
+
+    images = all_data.get('allImages', [])
+    total = len(images)
+    sys.stderr.write(f"Step 2: Total {total} IDs found. Starting individual path scan...\n")
+
+    # 3. 1件ずつパスを取得して解析（400エラーを物理的に回避）
     detected_count = 0
-
-    while True:
-        # findImages クエリを使用。filter引数の型をシンプルに指定。
-        query = '''
-        query FindImages($f: FindFilterType) {
-          findImages(filter: $f) {
-            count
-            images {
-              id
-              paths { screenshot }
-            }
-          }
-        }
-        '''
-        variables = {"f": {"page": page, "per_page": per_page}}
+    for count, item in enumerate(images, 1):
+        img_id = item['id']
         
-        i_data = stash_query(query, variables)
-        if not i_data:
-            sys.stderr.write(f"Page {page} でエラーが発生しました。終了します。\n")
-            break
-
-        res = i_data.get('findImages', {})
-        images = res.get('images', [])
-        total_count = res.get('count', 0)
-
-        if not images:
-            break
-
-        for img in images:
-            total_processed += 1
-            path = img.get('paths', {}).get('screenshot')
+        # 1枚ずつの取得なら Stash も絶対に拒否しません
+        detail_query = 'query($id: ID!) { findImage(id: $id) { paths { screenshot } } }'
+        detail_data = stash_query(detail_query, {"id": img_id})
+        
+        if not detail_data or not detail_data.get('findImage'):
+            continue
             
-            if is_mosaic(path):
-                detected_count += 1
-                sys.stderr.write(f"[{total_processed}/{total_count}] Detected: {os.path.basename(path)}\n")
-                
-                # タグ付与
-                u_query = 'mutation($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }'
-                stash_query(u_query, {"id": img['id'], "tags": [tag_id]})
+        path = detail_data['findImage'].get('paths', {}).get('screenshot')
 
-        sys.stderr.write(f"Progress: {total_processed}/{total_count} images...\n")
-        
-        if total_processed >= total_count:
-            break
-        page += 1
+        if is_mosaic(path):
+            detected_count += 1
+            sys.stderr.write(f"[{count}/{total}] Detected: {os.path.basename(path)}\n")
+            
+            # タグ更新
+            u_query = 'mutation($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }'
+            stash_query(u_query, {"id": img_id, "tags": [tag_id]})
 
-    sys.stderr.write(f"--- All Done! Found: {detected_count} ---\n")
+        # 100枚ごとに生存報告
+        if count % 100 == 0:
+            sys.stderr.write(f"Progress: {count}/{total} images checked...\n")
+
+    sys.stderr.write(f"--- Task Completed! Found: {detected_count} ---\n")
 
 if __name__ == "__main__":
     main()
