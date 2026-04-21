@@ -85,9 +85,13 @@ def main():
             print("Error: タグの作成に失敗しました。")
             return
 
+   # --- 修正後の main 関数内 ---
+
     # 2. 画像一覧を取得
     print("画像リストを取得中...")
-    image_data = stash_query('{ allImages { id path tags { id } } }')
+    # 'tags { id }' を一旦外し、最小構成でリクエストして 400 エラーを回避します
+    image_data = stash_query('{ allImages { id path } }')
+    
     if not image_data:
         print("画像データが取得できませんでした。")
         return
@@ -105,22 +109,18 @@ def main():
         img_id = img['id']
         path = img['path']
         
-        # 既にタグが付いている場合はスキップ（効率化）
-        existing_tag_ids = [t['id'] for t in img.get('tags', [])]
-        if tag_id in existing_tag_ids:
-            continue
-
+        # 解析実行
         if is_mosaic(path):
             detected_count += 1
-            print(f"[{count}/{total}] Detected: {os.path.basename(path)}")
+            print(f"[{count}/{total}] Detected Mosaic: {os.path.basename(path)}")
             
-            # タグを付与（既存のタグを維持しつつ追加）
-            new_tags = list(set(existing_tag_ids + [tag_id]))
+            # タグを付与（imageUpdateをシンプルに実行）
+            # ids をリスト形式で渡すのが Stash API のルールです
             stash_query('''
                 mutation($img_id: ID!, $tag_ids: [ID!]) {
                     imageUpdate(input: { id: $img_id, tag_ids: $tag_ids }) { id }
                 }
-            ''', {"img_id": img_id, "tag_ids": new_tags})
+            ''', {"img_id": img_id, "tag_ids": [tag_id]})
         
         if count % 100 == 0:
             print(f"Progress: {count}/{total} images processed...")
