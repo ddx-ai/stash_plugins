@@ -22,8 +22,7 @@ def stash_query(query, variables=None):
     if variables:
         payload['variables'] = variables
     try:
-        # IDリスト取得は時間がかかるためタイムアウトを長く
-        res = requests.post(STASH_URL, json=payload, headers=headers, timeout=120)
+        res = requests.post(STASH_URL, json=payload, headers=headers, timeout=20)
         return res.json().get('data')
     except:
         return None
@@ -43,7 +42,7 @@ def is_mosaic(path):
         return False
 
 def main():
-    sys.stderr.write("--- Starting Robust Scan (120k Images) ---\n")
+    sys.stderr.write("--- Starting Scraper-Based Scan (120k) ---\n")
     
     # 1. タグID取得
     data = stash_query('{ allTags { id name } }')
@@ -52,44 +51,50 @@ def main():
         sys.stderr.write(f"Error: タグ '{TARGET_TAG}' を作成してください。\n")
         return
 
-    # 2. 【実績あり】全IDだけを一括取得
-    sys.stderr.write("Step 1: Fetching all image IDs (this will work)...\n")
+    # 2. 全ID取得
     all_data = stash_query('{ allImages { id } }')
-    if not all_data:
-        sys.stderr.write("Failed to fetch ID list.\n")
-        return
-
+    if not all_data: return
     images = all_data.get('allImages', [])
     total = len(images)
-    sys.stderr.write(f"Step 2: Total {total} IDs found. Starting individual path scan...\n")
+    sys.stderr.write(f"Total {total} images. Starting scan...\n")
 
-    # 3. 1件ずつパスを取得して解析（400エラーを物理的に回避）
     detected_count = 0
     for count, item in enumerate(images, 1):
         img_id = item['id']
         
-        # 1枚ずつの取得なら Stash も絶対に拒否しません
-        detail_query = 'query($id: ID!) { findImage(id: $id) { paths { screenshot } } }'
-        detail_data = stash_query(detail_query, {"id": img_id})
+        # 3. スクレーパーと同じ形式でクエリ（findImage -> files -> path）
+        query = """
+        query GetPath($id: ID){
+          findImage(id: $id){
+            files {
+              path
+            }
+          }
+        }
+        """
+        detail = stash_query(query, {"id": img_id})
         
-        if not detail_data or not detail_data.get('findImage'):
+        if not detail or not detail.get('findImage'):
             continue
             
-        path = detail_data['findImage'].get('paths', {}).get('screenshot')
+        # filesリストから最初の要素のpathを取得
+        files = detail['findImage'].get('files', [])
+        if not files: continue
+        path = files[0].get('path')
 
+        # 4. 解析
         if is_mosaic(path):
             detected_count += 1
             sys.stderr.write(f"[{count}/{total}] Detected: {os.path.basename(path)}\n")
             
-            # タグ更新
+            # タグ付与
             u_query = 'mutation($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }'
             stash_query(u_query, {"id": img_id, "tags": [tag_id]})
 
-        # 100枚ごとに生存報告
         if count % 100 == 0:
-            sys.stderr.write(f"Progress: {count}/{total} images checked...\n")
+            sys.stderr.write(f"Progress: {count}/{total} checked...\n")
 
-    sys.stderr.write(f"--- Task Completed! Found: {detected_count} ---\n")
+    sys.stderr.write(f"--- Finished! Found: {detected_count} ---\n")
 
 if __name__ == "__main__":
     main()
