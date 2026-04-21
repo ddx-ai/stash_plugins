@@ -9,13 +9,22 @@ API_KEY = ""
 TARGET_TAG = "Mosaic" 
 THRESHOLD = 50 
 
-def stash_query(query):
+def stash_query(query, variables=None):
     headers = {"Content-Type": "application/json"}
-    if API_KEY: headers["ApiKey"] = API_KEY
+    if API_KEY:
+        headers["ApiKey"] = API_KEY
+    
+    # 以前の文字列結合をやめ、標準的な dict 構造に戻します
+    payload = {'query': query}
+    if variables:
+        payload['variables'] = variables
+        
     try:
-        res = requests.post(STASH_URL, json={'query': query}, headers=headers)
+        res = requests.post(STASH_URL, json=payload, headers=headers)
         if res.status_code == 400:
-            print(f"GraphQL 400 Error: {res.text}")
+            # 400エラーの場合、Stash側が「どこがダメか」をJSONで返しているのでそれを表示
+            print(f"!!! GraphQL Error (400) !!!")
+            print(f"Detail: {res.text}")
             return None
         return res.json().get('data')
     except Exception as e:
@@ -34,7 +43,7 @@ def is_mosaic(path):
     return grid_lines > THRESHOLD
 
 def main():
-    print("--- Starting Mosaic Detector (Paginated Mode) ---")
+    print("--- Mosaic Detector Engine Start ---")
     
     # 1. タグのIDを取得
     data = stash_query('{ allTags { id name } }')
@@ -43,35 +52,40 @@ def main():
     tag_id = next((t['id'] for t in tags if t['name'] == TARGET_TAG), None)
 
     if not tag_id:
-        print(f"Error: タグ '{TARGET_TAG}' を作成してください。")
+        print(f"Error: Stashで '{TARGET_TAG}' タグを手動作成してください。")
         return
 
-    # 2. 画像リストを分割して取得・解析
+    # 2. 分割取得 (公式ブラウザ版と同じスキーマを使用)
     page = 1
-    per_page = 1000  # 1000件ずつ取得
-    detected_count = 0
+    per_page = 1000
     total_processed = 0
 
     while True:
-        # 分割取得用のクエリ（findImages を使用）
-        query = f'''
-        {{
-          findImages(image_filter: {{}}, filter: {{ page: {page}, per_page: {per_page} }}) {{
+        # findImages の引数を変数を介して渡す、最も標準的な書き方
+        query = '''
+        query FindImages($filter: FindFilterType) {
+          findImages(filter: $filter) {
             count
-            images {{
+            images {
               id
               path
-            }}
-          }}
-        }}
+            }
+          }
+        }
         '''
-        print(f"Fetching page {page}...")
-        i_data = stash_query(query)
+        variables = {
+            "filter": {
+                "page": page,
+                "per_page": per_page
+            }
+        }
+        
+        i_data = stash_query(query, variables)
         if not i_data: break
 
-        find_data = i_data.get('findImages', {})
-        images = find_data.get('images', [])
-        total_count = find_data.get('count', 0)
+        find_res = i_data.get('findImages', {})
+        images = find_res.get('images', [])
+        total_count = find_res.get('count', 0)
 
         if not images:
             break
@@ -79,18 +93,22 @@ def main():
         for img in images:
             total_processed += 1
             if is_mosaic(img['path']):
-                detected_count += 1
-                print(f"[{total_processed}/{total_count}] Detected: {os.path.basename(img['path'])}")
+                print(f"Detected: {os.path.basename(img['path'])}")
                 
-                # タグ付与
-                u_query = 'mutation { imageUpdate(input: { id: "' + img['id'] + '", tag_ids: ["' + tag_id + '"] }) { id } }'
-                stash_query(u_query)
+                # タグ更新 (変数を使い、エスケープ漏れを防ぐ)
+                u_query = '''
+                mutation ImageUpdate($id: ID!, $tag_ids: [ID!]) {
+                  imageUpdate(input: { id: $id, tag_ids: $tag_ids }) { id }
+                }
+                '''
+                u_vars = {"id": img['id'], "tag_ids": [tag_id]}
+                stash_query(u_query, u_vars)
 
         if total_processed >= total_count:
             break
         page += 1
 
-    print(f"--- Finished! Processed: {total_processed}, Detected: {detected_count} ---")
+    print(f"--- All Done: {total_processed} images checked ---")
 
 if __name__ == "__main__":
     main()
