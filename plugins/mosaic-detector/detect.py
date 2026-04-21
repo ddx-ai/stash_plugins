@@ -2,66 +2,54 @@ import requests
 import cv2
 import numpy as np
 import os
-#import stash_utils
+import sys
+
 # --- 設定 ---
-STASH_URL = "http://localhost:9999/graphql"
-API_KEY = "YOUR_API_KEY"  # APIキーがない場合は空でOK
-TARGET_TAG = "Mosaic"     # 付与したいタグ名
-THRESHOLD = 50            # 直線検出のしきい値（枚数。画像に合わせて調整）
-
-headers = {"ApiKey": API_KEY} if API_KEY else {}
-
-import os
-import requests
+# ブラウザでStashを開いている時のURLに合わせてください
+STASH_URL = "http://127.0.0.1:9999/graphql" 
+API_KEY = ""  # 設定している場合のみ入力
+TARGET_TAG = "Mosaic" 
+THRESHOLD = 50  # 直線検出のしきい値。誤検知が多いなら上げる、漏れが多いなら下げる
 
 def stash_query(query, variables=None):
-    # プラグイン実行時にStashが提供するポートとAPIキーを環境変数から取得
-    # これが最も確実な方法です
-    port = os.environ.get("STASH_PORT", "9999")
-    api_key = os.environ.get("STASH_API_KEY")
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["ApiKey"] = API_KEY
     
-    # 127.0.0.1 (IPv4) を明示
-    url = f"http://127.0.0.1:{port}/graphql"
-    
-    headers = {
-        "Content-Type": "application/json",
-    }
-    if api_key:
-        headers["ApiKey"] = api_key
-
     payload = {'query': query}
     if variables:
         payload['variables'] = variables
-
-    try:
-        res = requests.post(url, json=payload, headers=headers)
         
-        # もしJSONじゃないものが返ってきたら、その内容をログに出して停止させる
-        if "application/json" not in res.headers.get("Content-Type", ""):
-            print(f"CRITICAL ERROR: Stash returned non-JSON response. HTTP {res.status_code}")
-            print(f"Response snippet: {res.text[:200]}")
+    try:
+        res = requests.post(STASH_URL, json=payload, headers=headers)
+        if res.status_code != 200:
             return None
-            
         return res.json().get('data')
     except Exception as e:
         print(f"Connection failed: {e}")
         return None
 
-def is_full_mosaic(path):
+def is_mosaic(path):
     """画像全体に格子状のパターンがあるか判定"""
-    if not os.path.exists(path): return False
+    if not os.path.exists(path):
+        return False
     
+    # 画像をグレースケールで読み込み
     img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-    if img is None: return False
+    if img is None:
+        return False
     
-    # 縮小して処理を高速化
+    # 解析速度向上のためリサイズ
     img = cv2.resize(img, (500, 500))
+    
     # エッジ検出
     edges = cv2.Canny(img, 50, 150)
+    
     # ハフ変換で直線を検出
     lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=80, maxLineGap=10)
     
-    if lines is None: return False
+    if lines is None:
+        return False
     
     # 垂直・水平に近い線だけをカウント
     grid_lines = 0
@@ -72,25 +60,73 @@ def is_full_mosaic(path):
             
     return grid_lines > THRESHOLD
 
-# 1. MosaicタグのIDを取得
-tag_data = stash_query('{ allTags { id name } }')
-tag_id = next((t['id'] for t in tag_data['allTags'] if t['name'] == TARGET_TAG), None)
+def main():
+    print(f"--- Mosaic Detection Task Started ---")
 
-if not tag_id:
-    print(f"Error: Tag '{TARGET_TAG}' not found in Stash.")
-    exit()
+    # 1. タグの準備
+    tag_data = stash_query('{ allTags { id name } }')
+    if tag_data is None:
+        print("Error: Stashへの接続に失敗しました。URLまたはAPIキーを確認してください。")
+        return
 
-# 2. 全画像を取得（フィルタリングが必要ならvariablesを追加）
-image_data = stash_query('{ allImages { id path } }')
+    tag_id = next((t['id'] for t in tag_data.get('allTags', []) if t['name'] == TARGET_TAG), None)
 
-print(f"Checking {len(image_data['allImages'])} images...")
-
-for img in image_data['allImages']:
-    if is_full_mosaic(img['path']):
-        print(f"Detected Mosaic: {img['path']}")
-        # 3. タグを付与
-        stash_query('''
-            mutation($img_id: ID!, $tag_id: [ID!]) {
-                imageUpdate(input: { id: $img_id, tag_ids: $tag_id }) { id }
+    if not tag_id:
+        print(f"Tag '{TARGET_TAG}' が見つかりません。新規作成します。")
+        create_res = stash_query('''
+            mutation($name: String!) {
+                tagCreate(input: { name: $name }) { id }
             }
-        ''', {"img_id": img['id'], "tag_id": [tag_id]})
+        ''', {"name": TARGET_TAG})
+        if create_res:
+            tag_id = create_res['tagCreate']['id']
+            print(f"Created Tag ID: {tag_id}")
+        else:
+            print("Error: タグの作成に失敗しました。")
+            return
+
+    # 2. 画像一覧を取得
+    print("画像リストを取得中...")
+    image_data = stash_query('{ allImages { id path tags { id } } }')
+    if not image_data:
+        print("画像データが取得できませんでした。")
+        return
+
+    images = image_data.get('allImages', [])
+    total = len(images)
+    print(f"Total images to scan: {total}")
+
+    # 3. 解析とタグ付け
+    count = 0
+    detected_count = 0
+
+    for img in images:
+        count += 1
+        img_id = img['id']
+        path = img['path']
+        
+        # 既にタグが付いている場合はスキップ（効率化）
+        existing_tag_ids = [t['id'] for t in img.get('tags', [])]
+        if tag_id in existing_tag_ids:
+            continue
+
+        if is_mosaic(path):
+            detected_count += 1
+            print(f"[{count}/{total}] Detected: {os.path.basename(path)}")
+            
+            # タグを付与（既存のタグを維持しつつ追加）
+            new_tags = list(set(existing_tag_ids + [tag_id]))
+            stash_query('''
+                mutation($img_id: ID!, $tag_ids: [ID!]) {
+                    imageUpdate(input: { id: $img_id, tag_ids: $tag_ids }) { id }
+                }
+            ''', {"img_id": img_id, "tag_ids": new_tags})
+        
+        if count % 100 == 0:
+            print(f"Progress: {count}/{total} images processed...")
+
+    print(f"--- Finished ---")
+    print(f"Scanned: {total}, Detected: {detected_count}")
+
+if __name__ == "__main__":
+    main()
