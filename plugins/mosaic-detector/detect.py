@@ -4,7 +4,7 @@ import numpy as np
 import os
 import sys
 
-# 標準出力をエラー出力へリダイレクト
+# 通信チャネルを汚さないための設定
 class Logger(object):
     def write(self, message):
         sys.stderr.write(message)
@@ -22,10 +22,8 @@ def stash_query(query, variables=None):
     if variables:
         payload['variables'] = variables
     try:
-        res = requests.post(STASH_URL, json=payload, headers=headers, timeout=30)
-        # 400エラーが出た場合、何が原因か詳細を表示
-        if res.status_code == 400:
-            sys.stderr.write(f"GraphQL Detail: {res.text}\n")
+        # 12万件のデータを受け取るためタイムアウトを長めに設定
+        res = requests.post(STASH_URL, json=payload, headers=headers, timeout=120)
         return res.json().get('data')
     except Exception as e:
         sys.stderr.write(f"Query Failed: {e}\n")
@@ -46,46 +44,48 @@ def is_mosaic(path):
         return False
 
 def main():
-    sys.stderr.write("--- Starting Mosaic Detector (Dynamic Field) ---\n")
+    sys.stderr.write("--- Starting Mosaic Detector (Final Edition) ---\n")
     
     # 1. タグID取得
     data = stash_query('{ allTags { id name } }')
-    if not data: return
-    tag_id = next((t['id'] for t in data.get('allTags', []) if t['name'] == TARGET_TAG), None)
+    tag_id = next((t['id'] for t in data.get('allTags', []) if t['name'] == TARGET_TAG), None) if data else None
     if not tag_id:
         sys.stderr.write(f"Error: タグ '{TARGET_TAG}' を作成してください。\n")
         return
 
-    # 2. 【変更】最も確実な ID と Path だけを取得
-    # 'path' がダメなら、Stashの公式ドキュメントで推奨される最小構成を試します
-    print("Fetching image list...")
-    i_data = stash_query('{ allImages { id path } }') # ← もしここで再度400なら、'path' を消してテスト
+    # 2. 12万件の画像パスを一括取得（paths { screenshot } を使用）
+    sys.stderr.write("Fetching 120k image paths...\n")
+    query = '{ allImages { id paths { screenshot } } }'
+    i_data = stash_query(query)
     
     if not i_data:
-        # 万が一 'path' がダメな時のためのバックアップ
-        sys.stderr.write("Retrying with fallback schema...\n")
-        i_data = stash_query('{ allImages { id } }')
-    
-    if not i_data: return
+        sys.stderr.write("Failed to fetch images. Data size might be too large.\n")
+        return
+
     images = i_data.get('allImages', [])
-    sys.stderr.write(f"Scanning {len(images)} images...\n")
+    total = len(images)
+    sys.stderr.write(f"Scanning {total} images. This may take a while...\n")
 
-    # 3. 解析
-    for img in images:
+    # 3. 解析ループ
+    detected_count = 0
+    for count, img in enumerate(images, 1):
         img_id = img['id']
-        # 'path' が存在しない、あるいは None の場合の処理
-        path = img.get('path')
-        
-        # ログを出しすぎると重くなるので、見つけた時だけ表示
-        if is_mosaic(path):
-            sys.stderr.write(f"Found Mosaic: {os.path.basename(path)}\n")
-            stash_query('''
-                mutation($id: ID!, $tags: [ID!]) {
-                    imageUpdate(input: { id: $id, tag_ids: $tags }) { id }
-                }
-            ''', {"id": img_id, "tags": [tag_id]})
+        # paths オブジェクトから実際のパスを取り出す
+        path = img.get('paths', {}).get('screenshot')
 
-    sys.stderr.write("--- Task Completed ---\n")
+        if is_mosaic(path):
+            detected_count += 1
+            sys.stderr.write(f"[{count}/{total}] Detected: {os.path.basename(path)}\n")
+            
+            # タグ更新
+            u_query = 'mutation($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }'
+            stash_query(u_query, {"id": img_id, "tags": [tag_id]})
+        
+        # 1000枚ごとにログで生存確認
+        if count % 1000 == 0:
+            sys.stderr.write(f"Progress: {count}/{total} images processed...\n")
+
+    sys.stderr.write(f"--- Task Completed! Found: {detected_count} ---\n")
 
 if __name__ == "__main__":
     main()
