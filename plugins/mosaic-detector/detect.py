@@ -51,13 +51,10 @@ def is_mosaic(path):
             if length > 400: continue
             angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180.0 / np.pi)
             
-            if angle < 5 or angle > 175:
-                horizontal_lines.append(line[0])
-            elif 85 < angle < 95:
-                vertical_lines.append(line[0])
+            if angle < 5 or angle > 175: horizontal_lines.append(line[0])
+            elif 85 < angle < 95: vertical_lines.append(line[0])
 
-        if len(horizontal_lines) < 15 or len(vertical_lines) < 15:
-            return False
+        if len(horizontal_lines) < 15 or len(vertical_lines) < 15: return False
 
         intersect_count = 0
         for h_line in horizontal_lines:
@@ -72,22 +69,20 @@ def is_mosaic(path):
                     intersect_count += 1
 
         return intersect_count > 200
-
-    except Exception as e:
+    except:
         return False
 
 def main():
-    sys.stderr.write("--- Starting Dual-Tagging Scan (Mosaic vs NoMosaic) ---\n")
+    sys.stderr.write("--- Starting Safe Tagging Scan (Preserving Existing Tags) ---\n")
     
-    # 1. 両方のタグIDを取得
+    # 1. タグID取得
     data = stash_query('{ allTags { id name } }')
     tags_map = {t['name']: t['id'] for t in data.get('allTags', [])} if data else {}
-    
     mosaic_id = tags_map.get(TAG_MOSAIC)
     no_mosaic_id = tags_map.get(TAG_NO_MOSAIC)
 
     if not mosaic_id or not no_mosaic_id:
-        sys.stderr.write(f"Error: '{TAG_MOSAIC}' と '{TAG_NO_MOSAIC}' タグを事前に作成してください。\n")
+        sys.stderr.write(f"Error: '{TAG_MOSAIC}' と '{TAG_NO_MOSAIC}' タグが必要です。\n")
         return
 
     # 2. 全ID取得
@@ -97,35 +92,47 @@ def main():
     total = len(images)
     sys.stderr.write(f"Processing {total} images...\n")
 
-    mosaic_count = 0
-    no_mosaic_count = 0
-
     for count, item in enumerate(images, 1):
         img_id = item['id']
         
-        # 3. パス取得
-        query = 'query GetPath($id: ID){ findImage(id: $id){ files { path } } }'
+        # 3. パスと「現在のタグ」を取得
+        query = '''
+        query GetImage($id: ID){
+          findImage(id: $id){
+            files { path }
+            tags { id }
+          }
+        }
+        '''
         detail = stash_query(query, {"id": img_id})
         if not detail or not detail.get('findImage'): continue
-        files = detail['findImage'].get('files', [])
+        
+        img_data = detail['findImage']
+        files = img_data.get('files', [])
         if not files: continue
         path = files[0].get('path')
 
-        # 4. 判定とタグ付与
-        is_m = is_mosaic(path)
-        target_tag_id = mosaic_id if is_m else no_mosaic_id
-        
-        if is_m: mosaic_count += 1
-        else: no_mosaic_count += 1
+        # 現在付いているタグIDのリストを作成（重複・消去防止）
+        current_tag_ids = [t['id'] for t in img_data.get('tags', [])]
 
-        # タグ付与の実行（GraphQL）
-        u_query = 'mutation($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }'
-        stash_query(u_query, {"id": img_id, "tags": [target_tag_id]})
+        # 4. 判定
+        is_m = is_mosaic(path)
+        new_tag_id = mosaic_id if is_m else no_mosaic_id
+        
+        # すでにそのタグが付いている、または相反するタグがある場合は整理
+        # (Mosaicを付けるならNoMosaicを消し、NoMosaicを付けるならMosaicを消す)
+        updated_tag_ids = [tid for tid in current_tag_ids if tid not in [mosaic_id, no_mosaic_id]]
+        updated_tag_ids.append(new_tag_id)
+
+        # タグに変更がある場合のみ更新を実行（サーバー負荷軽減）
+        if set(current_tag_ids) != set(updated_tag_ids):
+            u_query = 'mutation($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }'
+            stash_query(u_query, {"id": img_id, "tags": updated_tag_ids})
 
         if count % 100 == 0:
-            sys.stderr.write(f"Progress: {count}/{total} (Mosaic: {mosaic_count}, NoMosaic: {no_mosaic_count})\n")
+            sys.stderr.write(f"Progress: {count}/{total} checked...\n")
 
-    sys.stderr.write(f"--- Finished! Mosaic: {mosaic_count}, NoMosaic: {no_mosaic_count} ---\n")
+    sys.stderr.write("--- All Finished! ---\n")
 
 if __name__ == "__main__":
     main()
