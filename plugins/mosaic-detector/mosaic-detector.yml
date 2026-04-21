@@ -1,19 +1,21 @@
 name: Mosaic Detector
 description: 全面モザイクや格子状パターンを自動検出し、タグを付与します。
 version: 1.0
-url: https://github.com/ddx-ai/stash_plugins
-# 実行コマンド。PDMがインストールしたライブラリを使えるよう python を指定
+
+# ここから修正
 exec:
   - python
   - "{pluginDir}/detect.py"
+
 interface: raw
-# PDMに依存ライブラリのインストールを任せる
-requires:
-  - PythonDepManager
-  - opencv-python
-  - requests
-  - numpy
-# Stashのタスク画面に表示するボタンの設定
+
+# 以下の 'requires' ブロックを削除してください
+# requires:
+#   - PythonDepManager
+#   - opencv-python
+#   - requests
+#   - numpy
+
 tasks:
   - name: Scan All Images for Mosaics
     description: 全画像をスキャンしてモザイクを判定します
