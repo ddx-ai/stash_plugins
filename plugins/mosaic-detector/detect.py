@@ -2,7 +2,7 @@ import requests
 import cv2
 import numpy as np
 import os
-import stash_utils
+#import stash_utils
 # --- 設定 ---
 STASH_URL = "http://localhost:9999/graphql"
 API_KEY = "YOUR_API_KEY"  # APIキーがない場合は空でOK
