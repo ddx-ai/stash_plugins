@@ -4,7 +4,7 @@ import numpy as np
 import os
 import sys
 
-# 通信チャネルを汚さないための設定
+# 通信チャネル保護
 class Logger(object):
     def write(self, message):
         sys.stderr.write(message)
@@ -22,11 +22,11 @@ def stash_query(query, variables=None):
     if variables:
         payload['variables'] = variables
     try:
-        # 12万件のデータを受け取るためタイムアウトを長めに設定
-        res = requests.post(STASH_URL, json=payload, headers=headers, timeout=120)
+        res = requests.post(STASH_URL, json=payload, headers=headers, timeout=60)
+        if res.status_code != 200:
+            return None
         return res.json().get('data')
-    except Exception as e:
-        sys.stderr.write(f"Query Failed: {e}\n")
+    except:
         return None
 
 def is_mosaic(path):
@@ -44,7 +44,7 @@ def is_mosaic(path):
         return False
 
 def main():
-    sys.stderr.write("--- Starting Mosaic Detector (Final Edition) ---\n")
+    sys.stderr.write("--- Starting Mosaic Detector (Paginated Edition) ---\n")
     
     # 1. タグID取得
     data = stash_query('{ allTags { id name } }')
@@ -53,37 +53,55 @@ def main():
         sys.stderr.write(f"Error: タグ '{TARGET_TAG}' を作成してください。\n")
         return
 
-    # 2. 12万件の画像パスを一括取得（paths { screenshot } を使用）
-    sys.stderr.write("Fetching 120k image paths...\n")
-    query = '{ allImages { id paths { screenshot } } }'
-    i_data = stash_query(query)
-    
-    if not i_data:
-        sys.stderr.write("Failed to fetch images. Data size might be too large.\n")
-        return
-
-    images = i_data.get('allImages', [])
-    total = len(images)
-    sys.stderr.write(f"Scanning {total} images. This may take a while...\n")
-
-    # 3. 解析ループ
+    # 2. ページネーションによる順次取得
+    page = 1
+    per_page = 1000  # 1000件ずつ小分けにする
     detected_count = 0
-    for count, img in enumerate(images, 1):
-        img_id = img['id']
-        # paths オブジェクトから実際のパスを取り出す
-        path = img.get('paths', {}).get('screenshot')
+    total_processed = 0
 
-        if is_mosaic(path):
-            detected_count += 1
-            sys.stderr.write(f"[{count}/{total}] Detected: {os.path.basename(path)}\n")
-            
-            # タグ更新
-            u_query = 'mutation($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }'
-            stash_query(u_query, {"id": img_id, "tags": [tag_id]})
+    while True:
+        # findImages クエリで分割取得
+        query = '''
+        query FindImages($f: FindFilterType) {
+          findImages(filter: $f) {
+            count
+            images {
+              id
+              paths { screenshot }
+            }
+          }
+        }
+        '''
+        variables = {"f": {"page": page, "per_page": per_page}}
         
-        # 1000枚ごとにログで生存確認
-        if count % 1000 == 0:
-            sys.stderr.write(f"Progress: {count}/{total} images processed...\n")
+        i_data = stash_query(query, variables)
+        if not i_data:
+            sys.stderr.write(f"Failed to fetch page {page}. stopping.\n")
+            break
+
+        res = i_data.get('findImages', {})
+        images = res.get('images', [])
+        total_count = res.get('count', 0)
+
+        if not images:
+            break
+
+        for img in images:
+            total_processed += 1
+            path = img.get('paths', {}).get('screenshot')
+            
+            if is_mosaic(path):
+                detected_count += 1
+                sys.stderr.write(f"[{total_processed}/{total_count}] Detected: {os.path.basename(path)}\n")
+                
+                u_query = 'mutation($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }'
+                stash_query(u_query, {"id": img['id'], "tags": [tag_id]})
+
+        sys.stderr.write(f"Progress: {total_processed}/{total_count} processed...\n")
+        
+        if total_processed >= total_count:
+            break
+        page += 1
 
     sys.stderr.write(f"--- Task Completed! Found: {detected_count} ---\n")
 
