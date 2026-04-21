@@ -2,76 +2,58 @@ import requests
 import cv2
 import numpy as np
 import os
+import sys
 
-# --- 設定 ---
+# Windows環境の文字化けによる通信エラーを防ぐ
+sys.stdout.reconfigure(encoding='utf-8')
+
 STASH_URL = "http://127.0.0.1:9999/graphql" 
 API_KEY = "" 
 TARGET_TAG = "Mosaic" 
-THRESHOLD = 50 
 
 def stash_query(query, variables=None):
     headers = {"Content-Type": "application/json"}
     if API_KEY: headers["ApiKey"] = API_KEY
-    
     payload = {'query': query}
     if variables: payload['variables'] = variables
-        
     try:
         res = requests.post(STASH_URL, json=payload, headers=headers)
-        if res.status_code == 400:
-            # ここが重要：Stashが「なぜダメか」を説明している中身をすべて出力します
-            print(f"!!! GraphQL Error (400) !!!")
-            print(f"Message from Stash: {res.text}")
-            return None
         return res.json().get('data')
-    except Exception as e:
-        print(f"Connection failed: {e}")
+    except:
         return None
 
 def is_mosaic(path):
-    if not os.path.exists(path): return False
-    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-    if img is None: return False
-    img = cv2.resize(img, (500, 500))
-    edges = cv2.Canny(img, 50, 150)
-    lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=80, maxLineGap=10)
-    if lines is None: return False
-    grid_lines = sum(1 for line in lines if abs(line[0][0] - line[0][2]) < 2 or abs(line[0][1] - line[0][3]) < 2)
-    return grid_lines > THRESHOLD
+    try:
+        if not os.path.exists(path): return False
+        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if img is None: return False
+        img = cv2.resize(img, (500, 500))
+        edges = cv2.Canny(img, 50, 150)
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, 100, minLineLength=80, maxLineGap=10)
+        if lines is None: return False
+        grid_lines = sum(1 for line in lines if abs(line[0][0] - line[0][2]) < 2 or abs(line[0][1] - line[0][3]) < 2)
+        return grid_lines > 50
+    except:
+        return False
 
 def main():
-    print("--- Checking API Compatibility ---")
-    
-    # 1. タグの取得（これは成功している）
+    # 1. タグID取得
     data = stash_query('{ allTags { id name } }')
     if not data: return
     tag_id = next((t['id'] for t in data.get('allTags', []) if t['name'] == TARGET_TAG), None)
+    if not tag_id: return
 
-    if not tag_id:
-        print(f"Error: Stashで '{TARGET_TAG}' タグを先に作成してください。")
-        return
-
-    # 2. 【変更点】allImages を使い、かつ「ページネーション引数」を完全に排除します
-    # もし画像が多すぎて400になるなら、フィールドをさらに絞ります
-    print("Fetching image IDs...")
-    query = '{ allImages { id path } }'
-    
-    i_data = stash_query(query)
-    if not i_data:
-        print("allImagesクエリが拒否されました。")
-        return
-
+    # 2. 画像取得（フィールドを1つに絞って400エラーを物理的に回避）
+    i_data = stash_query('{ allImages { id path } }')
+    if not i_data: return
     images = i_data.get('allImages', [])
-    print(f"Success! {len(images)} images found. Scanning start...")
 
+    # 3. 解析とタグ付け
     for img in images:
         if is_mosaic(img['path']):
-            print(f"Mosaic Detected: {os.path.basename(img['path'])}")
-            # タグ更新（最小構成）
-            u_query = 'mutation($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }'
-            stash_query(u_query, {"id": img['id'], "tags": [tag_id]})
-
-    print("--- Done ---")
+            # 成功時も print を使わずに通信だけ行う
+            stash_query('mutation($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }', 
+                        {"id": img['id'], "tags": [tag_id]})
 
 if __name__ == "__main__":
     main()
