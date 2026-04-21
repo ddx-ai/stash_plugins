@@ -1,0 +1,12 @@
+name: Mosaic Detector
+description: 画像の格子状パターンを検出し、Mosaicタグを付与します
+exec:
+  - python
+  - "{pluginDir}/detect.py"
+interface: raw
+# PDMにインストールを依頼するライブラリ
+requires:
+  - PythonDepManager
+  - opencv-python
+  - requests
+  - numpy
