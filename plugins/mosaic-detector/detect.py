@@ -4,6 +4,7 @@ import numpy as np
 import os
 import sys
 
+# 通信チャネル保護（標準出力をエラー出力へ）
 class Logger(object):
     def write(self, message):
         sys.stderr.write(message)
@@ -22,6 +23,8 @@ def stash_query(query, variables=None):
         payload['variables'] = variables
     try:
         res = requests.post(STASH_URL, json=payload, headers=headers, timeout=60)
+        if res.status_code != 200:
+            return None
         return res.json().get('data')
     except:
         return None
@@ -33,57 +36,73 @@ def is_mosaic(path):
         if img is None: return False
         img = cv2.resize(img, (500, 500))
         edges = cv2.Canny(img, 50, 150)
-        lines = cv2.HoughLinesP(edges, 1, np.pi/180, 100, minLineLength=80, maxLineGap=10)
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, 100, 80, 10)
         if lines is None: return False
-        grid_lines = sum(1 for line in lines if abs(line[0][0] - line[0][2]) < 2 or abs(line[0][1] - line[0][3]) < 2)
+        grid_lines = sum(1 for line in lines if abs(line[0][0]-line[0][2]) < 2 or abs(line[0][1]-line[0][3]) < 2)
         return grid_lines > 50
     except:
         return False
 
 def main():
-    sys.stderr.write("--- Mosaic Detector: ID-First Strategy ---\n")
+    sys.stderr.write("--- Starting Paginated Image Scan (120k+) ---\n")
     
     # 1. タグID取得
     data = stash_query('{ allTags { id name } }')
     tag_id = next((t['id'] for t in data.get('allTags', []) if t['name'] == TARGET_TAG), None) if data else None
     if not tag_id:
-        sys.stderr.write(f"Error: タグ '{TARGET_TAG}' を手動で作成してください。\n")
+        sys.stderr.write(f"Error: タグ '{TARGET_TAG}' を作成してください。\n")
         return
 
-    # 2. 全画像のIDだけを一括取得 (実績のあるクエリ)
-    sys.stderr.write("Fetching all image IDs...\n")
-    all_data = stash_query('{ allImages { id } }')
-    if not all_data:
-        sys.stderr.write("Failed to fetch image IDs.\n")
-        return
-
-    images = all_data.get('allImages', [])
-    total = len(images)
-    sys.stderr.write(f"Total: {total} images. Starting deep scan...\n")
-
+    # 2. ページネーションで500件ずつ取得
+    page = 1
+    per_page = 500 
+    total_processed = 0
     detected_count = 0
-    for count, item in enumerate(images, 1):
-        img_id = item['id']
-        
-        # 3. 1枚ずつパスを問い合わせる (400エラーを回避)
-        img_detail = stash_query('query($id: ID!) { findImage(id: $id) { paths { screenshot } } }', {"id": img_id})
-        if not img_detail or not img_detail.get('findImage'):
-            continue
-            
-        path = img_detail['findImage'].get('paths', {}).get('screenshot')
 
-        # 4. 解析
-        if is_mosaic(path):
-            detected_count += 1
-            sys.stderr.write(f"[{count}/{total}] Mosaic! -> {os.path.basename(path)}\n")
-            
-            # タグ付与
-            stash_query('mutation($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }', 
-                        {"id": img_id, "tags": [tag_id]})
+    while True:
+        # findImages クエリを使用。filter引数の型をシンプルに指定。
+        query = '''
+        query FindImages($f: FindFilterType) {
+          findImages(filter: $f) {
+            count
+            images {
+              id
+              paths { screenshot }
+            }
+          }
+        }
+        '''
+        variables = {"f": {"page": page, "per_page": per_page}}
         
-        # 進捗表示
-        if count % 100 == 0:
-            sys.stderr.write(f"Progress: {count}/{total} images checked...\n")
+        i_data = stash_query(query, variables)
+        if not i_data:
+            sys.stderr.write(f"Page {page} でエラーが発生しました。終了します。\n")
+            break
+
+        res = i_data.get('findImages', {})
+        images = res.get('images', [])
+        total_count = res.get('count', 0)
+
+        if not images:
+            break
+
+        for img in images:
+            total_processed += 1
+            path = img.get('paths', {}).get('screenshot')
+            
+            if is_mosaic(path):
+                detected_count += 1
+                sys.stderr.write(f"[{total_processed}/{total_count}] Detected: {os.path.basename(path)}\n")
+                
+                # タグ付与
+                u_query = 'mutation($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }'
+                stash_query(u_query, {"id": img['id'], "tags": [tag_id]})
+
+        sys.stderr.write(f"Progress: {total_processed}/{total_count} images...\n")
+        
+        if total_processed >= total_count:
+            break
+        page += 1
 
     sys.stderr.write(f"--- All Done! Found: {detected_count} ---\n")
 
