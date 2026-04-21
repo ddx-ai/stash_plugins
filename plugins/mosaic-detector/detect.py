@@ -6,7 +6,7 @@ import os
 # --- 設定 ---
 STASH_URL = "http://127.0.0.1:9999/graphql" 
 API_KEY = "" 
-TARGET_TAG = "Mosaic"  # ← Stashの画面であらかじめ作っておいてください
+TARGET_TAG = "Mosaic" 
 THRESHOLD = 50 
 
 def stash_query(query):
@@ -15,7 +15,6 @@ def stash_query(query):
     try:
         res = requests.post(STASH_URL, json={'query': query}, headers=headers)
         if res.status_code == 400:
-            # エラーが出た場合、何がダメかログに出す
             print(f"GraphQL 400 Error: {res.text}")
             return None
         return res.json().get('data')
@@ -35,43 +34,63 @@ def is_mosaic(path):
     return grid_lines > THRESHOLD
 
 def main():
-    print("--- Starting Mosaic Detector (Safety Mode) ---")
+    print("--- Starting Mosaic Detector (Paginated Mode) ---")
     
     # 1. タグのIDを取得
     data = stash_query('{ allTags { id name } }')
     if not data: return
-    
     tags = data.get('allTags', [])
     tag_id = next((t['id'] for t in tags if t['name'] == TARGET_TAG), None)
 
-    # タグがない場合はエラーを出して止める（作成しようとして400になるのを防ぐ）
     if not tag_id:
-        print(f"Error: タグ '{TARGET_TAG}' が見つかりません。")
-        print("Stashの画面(Settings > Tags)で、あらかじめ 'Mosaic' というタグを作成してください。")
+        print(f"Error: タグ '{TARGET_TAG}' を作成してください。")
         return
 
-    # 2. 画像リストを取得
-    print("Fetching images...")
-    i_data = stash_query('{ allImages { id path } }')
-    if not i_data: return
-
-    images = i_data.get('allImages', [])
-    print(f"Scanning {len(images)} images...")
-
+    # 2. 画像リストを分割して取得・解析
+    page = 1
+    per_page = 1000  # 1000件ずつ取得
     detected_count = 0
-    for count, img in enumerate(images, 1):
-        if is_mosaic(img['path']):
-            detected_count += 1
-            print(f"[{count}/{len(images)}] Detected: {os.path.basename(img['path'])}")
-            
-            # タグ付与
-            u_query = 'mutation { imageUpdate(input: { id: "' + img['id'] + '", tag_ids: ["' + tag_id + '"] }) { id } }'
-            stash_query(u_query)
-        
-        if count % 100 == 0:
-            print(f"Progress: {count}/{len(images)} processed...")
+    total_processed = 0
 
-    print(f"--- Finished! Detected: {detected_count} ---")
+    while True:
+        # 分割取得用のクエリ（findImages を使用）
+        query = f'''
+        {{
+          findImages(image_filter: {{}}, filter: {{ page: {page}, per_page: {per_page} }}) {{
+            count
+            images {{
+              id
+              path
+            }}
+          }}
+        }}
+        '''
+        print(f"Fetching page {page}...")
+        i_data = stash_query(query)
+        if not i_data: break
+
+        find_data = i_data.get('findImages', {})
+        images = find_data.get('images', [])
+        total_count = find_data.get('count', 0)
+
+        if not images:
+            break
+
+        for img in images:
+            total_processed += 1
+            if is_mosaic(img['path']):
+                detected_count += 1
+                print(f"[{total_processed}/{total_count}] Detected: {os.path.basename(img['path'])}")
+                
+                # タグ付与
+                u_query = 'mutation { imageUpdate(input: { id: "' + img['id'] + '", tag_ids: ["' + tag_id + '"] }) { id } }'
+                stash_query(u_query)
+
+        if total_processed >= total_count:
+            break
+        page += 1
+
+    print(f"--- Finished! Processed: {total_processed}, Detected: {detected_count} ---")
 
 if __name__ == "__main__":
     main()
