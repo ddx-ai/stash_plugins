@@ -6,8 +6,9 @@ exec:
   - python
   - "{pluginDir}/detect.py"
 
+# リスト形式 (-) を使わず、直接キーを書く形式に修正
 settings:
-  - name: ReCheckMode
+  ReCheckMode:
     displayName: 再判定モード (Re-Check Mode)
     description: "ON: すべての画像を再判定 / OFF: 未判定（タグなし）のみスキャン"
     type: BOOLEAN
