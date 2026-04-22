@@ -16,6 +16,16 @@ except ImportError:
     print(json.dumps({"level": "error", "message": "stashapi not found"}))
     sys.exit(1)
 
+# --- 入力データの読み込み (mainの外で実行) ---
+# これが失敗すると Stash 側で exit status 1 となる
+try:
+    raw_input = sys.stdin.read()
+    json_input = json.loads(raw_input)
+except Exception as e:
+    # ログすら出せない状況に備えてstderrへ
+    sys.stderr.write(f"CRITICAL: Failed to read stdin: {e}\n")
+    sys.exit(1)
+
 # --- 設定値 ---
 TAG_MOSAIC = "Mosaic"
 TAG_NO_MOSAIC = "NoMosaic"
@@ -61,27 +71,15 @@ def is_mosaic(path, threshold):
         alignment = round(sum(count for val, count in Counter(x_coords).most_common(20)) / pt_count, 3)
         
         return (coverage >= threshold and alignment > 0.18), coverage, alignment, pt_count
-    except Exception as e:
-        log.debug(f"Analysis error: {e}")
+    except:
         return False, 0, 0, 0
 
 def main():
-    # --- セットアップ ---
-    # stdinの入力を安全に取得
-    try:
-        raw_input = sys.stdin.read()
-        if not raw_input:
-            # 入力がない場合は終了（手動実行時など）
-            return
-        json_input = json.loads(raw_input)
-    except Exception as e:
-        # ログが出力できる環境ならエラーを出す
-        sys.stderr.write(f"Error: Invalid input data: {e}\n")
-        sys.exit(1)
-
-    # 接続情報の存在確認
+    # json_inputはスコープ外から取得
+    global json_input
+    
     if "server_connection" not in json_input:
-        sys.stderr.write("Error: 'server_connection' missing in input\n")
+        log.error("Input missing 'server_connection'")
         sys.exit(1)
 
     client = StashInterface(json_input["server_connection"])
@@ -97,12 +95,12 @@ def main():
 
     log.info(f"Config: Mode={'RE-CHECK' if re_check else 'NEW ONLY'}, Threshold={threshold}")
 
-    # タグID取得 (StashItem.TAG を使用して明示的に取得)
+    # タグID取得
     m_tag = client.find_tag(TAG_MOSAIC, create=True)
     n_tag = client.find_tag(TAG_NO_MOSAIC, create=True)
     m_id, n_id = str(m_tag["id"]), str(n_tag["id"])
 
-    # 全画像取得 (StashItem.IMAGE を指定)
+    # 全画像取得
     log.info("Fetching images from Stash...")
     all_images = client.find_images(filter={"per_page": -1}, get_count=False)
     
@@ -128,14 +126,11 @@ def main():
         is_m, cov, alg, pts = is_mosaic(path, threshold)
         new_tag_id = m_id if is_m else n_id
         
-        # タグの完全洗浄と差し替え
         clean_tags = [tid for tid in current_tids if tid not in [m_id, n_id]]
         final_tags = clean_tags + [new_tag_id]
 
         status_label = ""
-        # 文字列比較で確実な更新判定
         if set(current_tids) != set(final_tags):
-            # 確実なGraphQL呼び出し
             mutation = """
             mutation Update($id: ID!, $tags: [ID!]) {
                 imageUpdate(input: { id: $id, tag_ids: $tags }) { id }
