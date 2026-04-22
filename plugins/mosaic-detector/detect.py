@@ -32,28 +32,53 @@ def stash_query(query, variables=None):
         return None
 
 def get_config():
-    """StashのSettingsから設定を取得。文字列を小数に変換する"""
+    """あらゆる手段でStashの設定を奪取する"""
+    re_check = False
+    threshold = 0.15
+    
+    # 手段1: 標準入力 (stdin) からの読み込みを試行
     try:
-        input_data = sys.stdin.read()
-        if input_data:
-            data = json.loads(input_data)
-            plugins = data.get('server_config', {}).get('plugins', {})
-            config = plugins.get('Mosaic Detector', {})
-            
-            re_check = config.get('ReCheckMode', False)
-            threshold_raw = config.get('Threshold')
-            try:
-                if threshold_raw and str(threshold_raw).strip():
-                    threshold = float(threshold_raw)
-                else:
-                    threshold = 0.15
-            except ValueError:
-                threshold = 0.15
-            
-            return re_check, threshold
+        if not sys.stdin.isatty():
+            line = sys.stdin.read()
+            if line:
+                data = json.loads(line)
+                # 実行時の引数(args)またはサーバー設定から取得
+                config = data.get('args', {}).get('server_config', {}).get('plugins', {}).get('Mosaic Detector', {})
+                if not config:
+                    config = data.get('server_config', {}).get('plugins', {}) .get('Mosaic Detector', {})
+                
+                if config:
+                    rc = config.get('ReCheckMode')
+                    re_check = str(rc).lower() == 'true' if rc is not None else False
+                    
+                    tr = config.get('Threshold')
+                    threshold = float(tr) if tr else 0.15
+                    return re_check, threshold
     except:
         pass
-    return False, 0.15
+
+    # 手段2: Stash APIを直接叩いて現在のプラグイン設定を取得する (最終手段)
+    # stdinが空の場合でも、Stash本体に「お前の設定はどうなってる？」と聞きに行きます
+    try:
+        query = """
+        {
+          configuration {
+            plugins
+          }
+        }
+        """
+        res = stash_query(query)
+        if res:
+            p_config = res.get('configuration', {}).get('plugins', {}).get('Mosaic Detector', {})
+            rc = p_config.get('ReCheckMode')
+            re_check = str(rc).lower() == 'true' if rc is not None else False
+            
+            tr = p_config.get('Threshold')
+            threshold = float(tr) if tr else 0.15
+    except:
+        pass
+
+    return re_check, threshold
 
 def is_mosaic(path, threshold):
     """
