@@ -29,110 +29,101 @@ def stash_query(query, variables=None):
         return None
 
 def is_mosaic(path):
+    """
+    タイル構造（モザイク）の密度を解析するロジック
+    """
     if not path or not os.path.exists(path): return False
     try:
-        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        img = cv2.imread(path)
         if img is None: return False
-        h, w = img.shape
-        if h < 100 or w < 100: return False
-
-        img_resized = cv2.resize(img, (500, 500))
-        edges = cv2.Canny(img_resized, 80, 200)
-        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=80, minLineLength=30, maxLineGap=5)
         
-        if lines is None: return False
-
-        horizontal_lines = []
-        vertical_lines = []
+        # 1. 解析用の前処理（少し大きめに戻してタイルを認識しやすくする）
+        img_res = cv2.resize(img, (512, 512))
+        gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY)
         
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            length = np.sqrt((x2-x1)**2 + (y2-y1)**2)
-            if length > 400: continue
-            angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180.0 / np.pi)
-            
-            if angle < 5 or angle > 175: horizontal_lines.append(line[0])
-            elif 85 < angle < 95: vertical_lines.append(line[0])
+        # 2. ソーベルフィルタで垂直・水平の「色の段差」を抽出
+        # 直線ではなく「色の変わり目」を面で捉える
+        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        
+        # 絶対値をとって合成（エッジ画像）
+        mag = np.hypot(sobelx, sobely)
+        mag = np.uint8(mag / mag.max() * 255)
+        
+        # 3. モルフォロジー演算（ここがミソ）
+        # モザイクの「点」を繋いで、格子の塊（クラスター）にする
+        kernel = np.ones((5,5), np.uint8)
+        dilated = cv2.dilate(mag, kernel, iterations=1)
+        
+        # 4. 輪郭抽出と「正方形度」のチェック
+        # モザイクのタイルは小さな四角形の集まりなので、その形状をカウントする
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        mosaic_candidate_count = 0
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            # 小さすぎるノイズと、大きすぎる背景（4コマの枠など）を除外
+            if 50 < area < 2000:
+                # 形状の複雑さ（円形度に近い指標）を確認
+                # モザイクのタイルが密集した領域は、ゴツゴツした塊になる
+                peri = cv2.arcLength(cnt, True)
+                if peri == 0: continue
+                approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
+                
+                # 四角形に近い、または多角形の塊であればカウント
+                if 4 <= len(approx) <= 12:
+                    mosaic_candidate_count += 1
 
-        if len(horizontal_lines) < 15 or len(vertical_lines) < 15: return False
+        # 5. 判定（密集度）
+        # 512x512の画像内に、モザイクと思われるタイルの塊が一定数以上あるか
+        # 床や縦じまは「巨大な1つの輪郭」になるため、個数は増えません。
+        # 4コマ漫画も輪郭数は少ないです。
+        return mosaic_candidate_count > 40
 
-        intersect_count = 0
-        for h_line in horizontal_lines:
-            hx1, hy1, hx2, hy2 = h_line
-            hy_avg = (hy1 + hy2) / 2
-            for v_line in vertical_lines:
-                vx1, vy1, vx2, vy2 = v_line
-                vx_avg = (vx1 + vx2) / 2
-                h_x_min, h_x_max = min(hx1, hx2), max(hx1, hx2)
-                v_y_min, v_y_max = min(vy1, vy2), max(vy1, vy2)
-                if (h_x_min <= vx_avg <= h_x_max) and (v_y_min <= hy_avg <= v_y_max):
-                    intersect_count += 1
-
-        return intersect_count > 200
-    except:
+    except Exception as e:
         return False
 
 def main():
-    sys.stderr.write("--- Starting Safe Tagging Scan (Preserving Existing Tags) ---\n")
+    sys.stderr.write("--- Starting High-Density Mosaic Scan (Final Tuning) ---\n")
     
-    # 1. タグID取得
     data = stash_query('{ allTags { id name } }')
     tags_map = {t['name']: t['id'] for t in data.get('allTags', [])} if data else {}
     mosaic_id = tags_map.get(TAG_MOSAIC)
     no_mosaic_id = tags_map.get(TAG_NO_MOSAIC)
 
     if not mosaic_id or not no_mosaic_id:
-        sys.stderr.write(f"Error: '{TAG_MOSAIC}' と '{TAG_NO_MOSAIC}' タグが必要です。\n")
+        sys.stderr.write("Error: Mosaic or NoMosaic tags not found.\n")
         return
 
-    # 2. 全ID取得
     all_data = stash_query('{ allImages { id } }')
     if not all_data: return
     images = all_data.get('allImages', [])
     total = len(images)
-    sys.stderr.write(f"Processing {total} images...\n")
 
     for count, item in enumerate(images, 1):
         img_id = item['id']
-        
-        # 3. パスと「現在のタグ」を取得
-        query = '''
-        query GetImage($id: ID){
-          findImage(id: $id){
-            files { path }
-            tags { id }
-          }
-        }
-        '''
+        query = 'query GetImage($id: ID){ findImage(id: $id){ files { path } tags { id } } }'
         detail = stash_query(query, {"id": img_id})
         if not detail or not detail.get('findImage'): continue
         
         img_data = detail['findImage']
-        files = img_data.get('files', [])
-        if not files: continue
-        path = files[0].get('path')
-
-        # 現在付いているタグIDのリストを作成（重複・消去防止）
+        path = img_data['files'][0]['path']
         current_tag_ids = [t['id'] for t in img_data.get('tags', [])]
 
-        # 4. 判定
         is_m = is_mosaic(path)
         new_tag_id = mosaic_id if is_m else no_mosaic_id
         
-        # すでにそのタグが付いている、または相反するタグがある場合は整理
-        # (Mosaicを付けるならNoMosaicを消し、NoMosaicを付けるならMosaicを消す)
         updated_tag_ids = [tid for tid in current_tag_ids if tid not in [mosaic_id, no_mosaic_id]]
         updated_tag_ids.append(new_tag_id)
 
-        # タグに変更がある場合のみ更新を実行（サーバー負荷軽減）
         if set(current_tag_ids) != set(updated_tag_ids):
             u_query = 'mutation($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }'
             stash_query(u_query, {"id": img_id, "tags": updated_tag_ids})
 
         if count % 100 == 0:
-            sys.stderr.write(f"Progress: {count}/{total} checked...\n")
+            sys.stderr.write(f"Progress: {count}/{total} (Currently tagging {'Mosaic' if is_m else 'NoMosaic'})\n")
 
-    sys.stderr.write("--- All Finished! ---\n")
+    sys.stderr.write("--- Scan Completed ---\n")
 
 if __name__ == "__main__":
     main()
