@@ -1,14 +1,8 @@
 name: Mosaic Detector
-description: Detects mosaics in images
-version: 1.0
-
-tasks:
+external_tasks:
   - name: "Scan Mosaics"
-    description: "Scan images for mosaics"
-    # argumentsとexecはtaskの直下に正しく配置します
     arguments:
       - name: ReCheck
-        description: "すでに判定済みの画像も再チェックする"
         type: Boolean
         default: false
     exec:
