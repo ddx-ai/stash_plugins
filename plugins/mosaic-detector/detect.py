@@ -66,10 +66,25 @@ def is_mosaic(path, threshold):
         return False, 0, 0, 0
 
 def main():
-    # stdinから接続情報を取得
-    json_input = json.loads(sys.stdin.read())
+    # --- セットアップ ---
+    # stdinの入力を安全に取得
+    try:
+        raw_input = sys.stdin.read()
+        if not raw_input:
+            # 入力がない場合は終了（手動実行時など）
+            return
+        json_input = json.loads(raw_input)
+    except Exception as e:
+        # ログが出力できる環境ならエラーを出す
+        sys.stderr.write(f"Error: Invalid input data: {e}\n")
+        sys.exit(1)
+
+    # 接続情報の存在確認
+    if "server_connection" not in json_input:
+        sys.stderr.write("Error: 'server_connection' missing in input\n")
+        sys.exit(1)
+
     client = StashInterface(json_input["server_connection"])
-    
     log.info("Mosaic Detector: Starting task...")
 
     # 設定取得
