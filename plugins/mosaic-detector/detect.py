@@ -37,10 +37,12 @@ def get_config():
         input_data = sys.stdin.read()
         if input_data:
             data = json.loads(input_data)
-            # plugin名 'Mosaic Detector' の下の 'ReCheckMode' を参照
-            return data.get('server_config', {}).get('plugins', {}).get('Mosaic Detector', {}).get('ReCheckMode', False)
-    except:
-        pass
+            # server_config -> plugins -> [プラグイン名] -> [設定名]
+            plugins_config = data.get('server_config', {}).get('plugins', {})
+            my_config = plugins_config.get('Mosaic Detector', {})
+            return my_config.get('ReCheckMode', False)
+    except Exception as e:
+        sys.stderr.write(f"Config Load Error: {e}\n")
     return False
 
 def is_mosaic(path):
