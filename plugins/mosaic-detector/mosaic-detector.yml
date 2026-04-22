@@ -1,21 +1,15 @@
 name: Mosaic Detector
-description: 全面モザイクや格子状パターンを自動検出し、タグを付与します。
+description: Detects mosaics in images
 version: 1.0
-
-# ここから修正
-exec:
-  - python
-  - "{pluginDir}/detect.py"
-
-interface: raw
-
-# 以下の 'requires' ブロックを削除してください
-# requires:
-#   - PythonDepManager
-#   - opencv-python
-#   - requests
-#   - numpy
-
 tasks:
-  - name: Scan All Images for Mosaics
-    description: 全画像をスキャンしてモザイクを判定します
+  - name: "Scan Mosaics"
+    description: "Scan images for mosaics"
+    # ここに引数の定義を追加
+    arguments:
+      - name: ReCheck
+        description: "すでに判定済みの画像も再チェックする"
+        type: Boolean
+        default: false
+    exec:
+      - python
+      - "{pluginDir}/detect.py"
