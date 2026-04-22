@@ -83,53 +83,50 @@ def main():
         sys.stderr.write("Error: Mosaic/NoMosaic tags missing.\n")
         return
 
-    # 2. 画像取得クエリの修正
+    # 2. 【APIエラー回避策】まず全画像のIDとタグ情報を一括取得
+    # 複雑なフィルターをAPIに投げず、Python側で仕分けます
+    sys.stderr.write("Fetching image list from Stash...\n")
+    res = stash_query('{ allImages { id tags { id } } }')
+    all_images = res.get('allImages', []) if res else []
+    
+    images = []
     if re_check_mode:
-        res = stash_query('{ allImages { id } }')
-        images = res.get('allImages', []) if res else []
+        images = all_images
     else:
-        # 400エラーを回避するため、より標準的なフィルター形式に変更
-        q = """
-        query Unchecked($tag_filter: TagFilterType!) {
-          findImages(image_filter: { tags: $tag_filter }) {
-            images { id }
-          }
-        }
-        """
-        # 「MosaicもNoMosaicも付いていない」画像を抽出
-        variables = {
-            "tag_filter": {
-                "modifier": "NOT_INCLUDES",
-                "value": [m_id, n_id]
-            }
-        }
-        res = stash_query(q, variables)
-        images = res['findImages']['images'] if res else []
+        # MosaicもNoMosaicも持っていない画像だけを抽出（Python側で判定）
+        for img in all_images:
+            existing_tag_ids = [t['id'] for t in img.get('tags', [])]
+            if m_id not in existing_tag_ids and n_id not in existing_tag_ids:
+                images.append(img)
 
     total = len(images)
-    sys.stderr.write(f"Target: {total} images.\n")
+    sys.stderr.write(f"Target: {total} images (Filtered from {len(all_images)} total).\n")
 
-    # (以下、ループ処理はそのまま)
-
+    # 3. ループ処理
     for count, item in enumerate(images, 1):
         img_id = item['id']
+        # ファイルパス取得
         detail = stash_query('query G($id: ID){ findImage(id: $id){ files { path } tags { id } } }', {"id": img_id})
         if not detail or not detail['findImage']: continue
+        
         img_data = detail['findImage']
         path = img_data['files'][0]['path']
         current_tag_ids = [t['id'] for t in img_data.get('tags', [])]
-        
+
         is_m = is_mosaic(path)
         new_tag_id = m_id if is_m else n_id
-        updated_tag_ids = [tid for tid in current_tag_ids if tid not in [m_id, n_id]] + [new_tag_id]
+        
+        clean_tag_ids = [tid for tid in current_tag_ids if tid not in [m_id, n_id]]
+        updated_tag_ids = clean_tag_ids + [new_tag_id]
 
         if set(current_tag_ids) != set(updated_tag_ids):
             stash_query('mutation U($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }', 
                         {"id": img_id, "tags": updated_tag_ids})
-        if count % 100 == 0:
-            sys.stderr.write(f"Progress: {count}/{total}\n")
 
-    sys.stderr.write("--- Done ---\n")
+        if count % 100 == 0:
+            sys.stderr.write(f"Progress: {count}/{total} done.\n")
+
+    sys.stderr.write("--- Scan Finished --- \n")
 
 if __name__ == "__main__":
     main()
