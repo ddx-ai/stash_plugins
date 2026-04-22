@@ -11,8 +11,8 @@ settings:
     type: BOOLEAN
   Threshold:
     displayName: 判定しきい値 (Mosaic Coverage Threshold)
-    description: "モザイクが画像を占める割合 (0.05-0.50)。値を上げると判定が厳しくなります。"
-    type: NUMBER
+    description: "0.05〜0.50の範囲で入力してください（例: 0.15）"
+    type: STRING
 tasks:
   - name: "Scan Mosaics"
     description: "設定されたしきい値に基づいて画像をスキャンします。"
