@@ -32,44 +32,49 @@ def stash_query(query, variables=None):
         return None
 
 def get_config():
-    """Stashが提供する'args'階層から設定を抽出する"""
+    """BulkImageScrapeと同じ方式で設定を確実に取得する"""
     re_check = False
     threshold = 0.15
     
     try:
-        if not sys.stdin.isatty():
-            raw_input = sys.stdin.read()
-            if raw_input:
-                data = json.loads(raw_input)
-                
-                # ログから判明した 'args' 階層を探索
-                # Stashのタスク実行時は args -> server_config の中にプラグイン設定が入ります
-                args = data.get('args', {})
-                config = args.get('server_config', {}).get('plugins', {}).get('Mosaic Detector', {})
-                
-                if not config:
-                    # バックアップ：API経由で直接取得を試みる
-                    res = stash_query('{ configuration { plugins } }')
-                    if res:
-                        config = res.get('configuration', {}).get('plugins', {}).get('Mosaic Detector', {})
-
-                if config:
-                    sys.stderr.write(f"DEBUG: Found Config: {config}\n")
-                    # 大文字小文字を無視してキーを探索
-                    for k, v in config.items():
-                        if k.lower() == 'recheckmode':
-                            re_check = str(v).lower() == 'true'
-                        if k.lower() == 'threshold':
-                            try:
-                                threshold = float(v)
-                            except:
-                                threshold = 0.15
+        # 1. API経由で現在の全プラグイン設定を取得
+        # (stash_queryは既に定義されているものを使用)
+        res = stash_query('{ configuration { plugins } }')
+        if not res:
+            return False, 0.15
+            
+        all_configs = res.get('configuration', {}).get('plugins', {})
+        
+        # 2. "Mosaic Detector" またはフォルダ名と思われるキーを探す
+        # 念のため、大文字小文字を無視して一致するものを探す
+        config = {}
+        for key in all_configs.keys():
+            if key.lower() in ["mosaic detector", "mosaic-detector", "stash-plugin"]:
+                config = all_configs[key]
+                break
+        
+        if config:
+            # ReCheckModeの取得
+            rc = config.get('ReCheckMode')
+            if rc is not None:
+                # bool値、または文字列の "true" を判定
+                re_check = str(rc).lower() == 'true' if not isinstance(rc, bool) else rc
+            
+            # Thresholdの取得
+            tr = config.get('Threshold')
+            if tr:
+                try:
+                    threshold = float(tr)
+                except:
+                    threshold = 0.15
                     
-                    return re_check, threshold
-    except Exception as e:
-        sys.stderr.write(f"DEBUG: Config Error: {e}\n")
+            sys.stderr.write(f"DEBUG: Config Loaded -> ReCheck:{re_check}, Threshold:{threshold}\n")
+            return re_check, threshold
 
-    return re_check, threshold
+    except Exception as e:
+        sys.stderr.write(f"DEBUG: Config Retrieval Error: {e}\n")
+        
+    return False, 0.15
 
 def is_mosaic(path, threshold):
     """
