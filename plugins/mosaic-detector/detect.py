@@ -44,28 +44,26 @@ def get_config():
 
 def is_mosaic(path):
     """
-    高精度コーナー距離解析：
-    1000px以上の元データにある「正方形の角」の規則的な並びを検出します。
+    軸整合性スキャン：
+    角の距離だけでなく、それらが水平・垂直のライン(グリッド)上に
+    正しく並んでいるかを厳格に判定し、自然画の誤検知を排除します。
     """
     if not path or not os.path.exists(path): return False
     try:
         img = cv2.imread(path)
         if img is None: return False
         
-        # 1. 1000px以上のサイズを維持して解析
         h, w = img.shape[:2]
-        target_size = max(h, w, 1024)
-        if target_size > 2048: target_size = 2048 # 重すぎ防止のキャップ
+        target_size = 1024
         img_res = cv2.resize(img, (target_size, target_size))
         gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY)
         
-        # 2. ハリスコーナー検出：正方形タイルの「角」を強調
+        # 1. コーナー検出
         dst = cv2.cornerHarris(gray, 2, 3, 0.04)
         dst = cv2.dilate(dst, None)
         ret, dst = cv2.threshold(dst, 0.01 * dst.max(), 255, 0)
         dst = np.uint8(dst)
 
-        # 3. 検出された「角」の座標リストを作成
         contours, _ = cv2.findContours(dst, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         points = []
         for cnt in contours:
@@ -73,28 +71,45 @@ def is_mosaic(path):
             if M["m00"] != 0:
                 points.append((int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])))
         
-        if len(points) < 120: return False
+        if len(points) < 100 or len(points) > 5000: # 点が多すぎる(ノイズ)場合も除外
+            return False
 
-        # 4. 角と角の距離をサンプリング（規則性の証明）
+        # 2. 軸の整合性チェック (水平・垂直に並んでいるか)
+        # モザイクの角は、同じX座標または同じY座標に集中する性質があります
+        x_coords = [p[0] for p in points]
+        y_coords = [p[1] for p in points]
+        
+        # 座標の出現頻度をカウント
+        x_counts = Counter(x_coords).most_common(20)
+        y_counts = Counter(y_coords).most_common(20)
+        
+        # 上位20個の軸に、全ポイントの何割が乗っているか
+        # 普通の画像はバラバラですが、モザイクは特定のラインに集中します
+        x_alignment = sum(count for val, count in x_counts) / len(points)
+        y_alignment = sum(count for val, count in y_counts) / len(points)
+
+        # 3. 隣接距離の規則性
         distances = []
-        sample_points = points[:600]
+        sample_points = points[:400]
         for i in range(len(sample_points)):
             p1 = sample_points[i]
-            for j in range(i + 1, min(i + 25, len(sample_points))):
+            for j in range(i + 1, min(i + 20, len(sample_points))):
                 p2 = sample_points[j]
                 dist = np.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
-                # 正方形タイルらしい距離(5px〜60px)を記録
-                if 8 < dist < 60:
+                if 8 < dist < 50:
                     distances.append(round(dist, 0))
 
         if not distances: return False
-
-        # 最も頻出する距離の出現回数を確認
         dist_counts = Counter(distances)
-        common_dist, count = dist_counts.most_common(1)[0]
+        common_dist, dist_freq = dist_counts.most_common(1)[0]
+        
+        # --- 判定しきい値 ---
+        # 軸の一致度 (alignment) が高く、かつ特定の距離が支配的であること
+        # 普通の画像(風景など)はこの x_alignment が 0.1 以下になることが多いです
+        is_aligned = (x_alignment > 0.15 or y_alignment > 0.15)
+        has_regular_dist = (dist_freq > 35)
 
-        # 判定：同じ距離に配置された「角」が50個以上あれば人工的なモザイクと断定
-        return count > 50
+        return is_aligned and has_regular_dist
 
     except:
         return False
