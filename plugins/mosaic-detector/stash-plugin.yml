@@ -2,17 +2,15 @@ name: Mosaic Detector
 description: Detects mosaics in images
 version: 1.0
 
-# 1. exec は一番左（インデントなし）に書く
-exec:
-  - python
-  - "{pluginDir}/detect.py"
-
-# 2. tasks も一番左（インデントなし）に書く
 tasks:
   - name: "Scan Mosaics"
     description: "Scan images for mosaics"
-    # arguments はここ（taskの名前の下）に書く
-    arguments:
+    # ここです。execとargumentsを同じ階層に並べます
+    exec:
+      - python
+      - "{pluginDir}/detect.py"
+    # UIに表示するためのパラメータ
+    parameters:
       - name: ReCheck
         description: "すでに判定済みの画像も再チェックする"
         type: Boolean
