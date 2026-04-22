@@ -32,49 +32,50 @@ def stash_query(query, variables=None):
         return None
 
 def get_config():
-    """あらゆる手段でStashの設定を奪取する"""
+    """設定を全探索し、現在の状況をログに出力する"""
     re_check = False
     threshold = 0.15
     
-    # 手段1: 標準入力 (stdin) からの読み込みを試行
     try:
+        # stdinから全てのデータを取り込む
         if not sys.stdin.isatty():
-            line = sys.stdin.read()
-            if line:
-                data = json.loads(line)
-                # 実行時の引数(args)またはサーバー設定から取得
-                config = data.get('args', {}).get('server_config', {}).get('plugins', {}).get('Mosaic Detector', {})
-                if not config:
-                    config = data.get('server_config', {}).get('plugins', {}) .get('Mosaic Detector', {})
+            raw_input = sys.stdin.read()
+            if raw_input:
+                data = json.loads(raw_input)
+                # ログに届いたデータ構造を出力（デバッグ用）
+                sys.stderr.write(f"DEBUG: Input Data Keys: {list(data.keys())}\n")
+                
+                # プラグイン設定の階層を深く探索
+                # server_config -> plugins -> Mosaic Detector
+                plugins_config = data.get('server_config', {}).get('plugins', {})
+                config = plugins_config.get('Mosaic Detector', {})
                 
                 if config:
-                    rc = config.get('ReCheckMode')
-                    re_check = str(rc).lower() == 'true' if rc is not None else False
+                    sys.stderr.write(f"DEBUG: Plugin Config: {config}\n")
+                    # キー名が小文字や大文字でズレている可能性を考慮して全探索
+                    for k, v in config.items():
+                        if k.lower() == 'recheckmode':
+                            re_check = str(v).lower() == 'true'
+                        if k.lower() == 'threshold':
+                            try: threshold = float(v)
+                            except: pass
                     
-                    tr = config.get('Threshold')
-                    threshold = float(tr) if tr else 0.15
                     return re_check, threshold
-    except:
-        pass
+    except Exception as e:
+        sys.stderr.write(f"DEBUG: Config read error: {e}\n")
 
-    # 手段2: Stash APIを直接叩いて現在のプラグイン設定を取得する (最終手段)
-    # stdinが空の場合でも、Stash本体に「お前の設定はどうなってる？」と聞きに行きます
+    # 失敗した場合の最終手段：もう一度API経由で直接取得
     try:
-        query = """
-        {
-          configuration {
-            plugins
-          }
-        }
-        """
-        res = stash_query(query)
+        res = stash_query('{ configuration { plugins } }')
         if res:
             p_config = res.get('configuration', {}).get('plugins', {}).get('Mosaic Detector', {})
-            rc = p_config.get('ReCheckMode')
-            re_check = str(rc).lower() == 'true' if rc is not None else False
-            
-            tr = p_config.get('Threshold')
-            threshold = float(tr) if tr else 0.15
+            if p_config:
+                for k, v in p_config.items():
+                    if k.lower() == 'recheckmode':
+                        re_check = str(v).lower() == 'true'
+                    if k.lower() == 'threshold':
+                        try: threshold = float(v)
+                        except: pass
     except:
         pass
 
