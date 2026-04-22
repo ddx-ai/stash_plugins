@@ -34,10 +34,9 @@ def get_config():
         input_data = sys.stdin.read()
         if input_data:
             data = json.loads(input_data)
-            # server_config -> plugins -> Mosaic Detector -> ReCheckMode
             plugins = data.get('server_config', {}).get('plugins', {})
-            # フォルダ名ではなく、ymlの 'name' フィールドで指定した名前がキーになります
             config = plugins.get('Mosaic Detector', {})
+            # ここでデフォルト値を指定（辞書のgetメソッドの第2引数）
             return config.get('ReCheckMode', False)
     except:
         pass
