@@ -1,64 +1,27 @@
-import requests
-import cv2
-import numpy as np
-import os
 import sys
 import json
+import os
+import cv2
+import numpy as np
 from collections import Counter
 
-# stashapiを読み込み
+# --- stashapiの確実なインポート ---
 try:
     from PythonDepManager import ensure_import
     ensure_import("stashapi")
     import stashapi.log as log
+    from stashapi.stash_types import StashItem
+    from stashapi.stashapp import StashInterface
 except ImportError:
-    # 万が一読み込めなかった場合のフォールバック
-    class DummyLog:
-        def info(self, msg): sys.stderr.write(f"INFO: {msg}\n")
-        def error(self, msg): sys.stderr.write(f"ERROR: {msg}\n")
-    log = DummyLog()
+    print(json.dumps({"level": "error", "message": "stashapi not found"}))
+    sys.exit(1)
 
-# --- 設定とタグ ---
-STASH_PORT = os.environ.get("STASH_PORT", "9999")
-STASH_URL = f"http://127.0.0.1:{STASH_PORT}/graphql"
+# --- 設定値 ---
 TAG_MOSAIC = "Mosaic"
 TAG_NO_MOSAIC = "NoMosaic"
 
-def stash_query(query, variables=None):
-    headers = {"Content-Type": "application/json"}
-    payload = {'query': query}
-    if variables:
-        payload['variables'] = variables
-    try:
-        res = requests.post(STASH_URL, json=payload, headers=headers, timeout=30)
-        return res.json().get('data')
-    except:
-        return None
-
-def get_config():
-    """API経由で設定を直接取得"""
-    re_check = False
-    threshold = 0.15
-    try:
-        res = stash_query('{ configuration { plugins } }')
-        if res:
-            all_configs = res.get('configuration', {}).get('plugins', {})
-            for key in all_configs.keys():
-                if key.lower() in ["mosaic detector", "mosaic-detector", "stash-plugin"]:
-                    config = all_configs[key]
-                    rc = config.get('ReCheckMode')
-                    re_check = str(rc).lower() == 'true' if not isinstance(rc, bool) else rc
-                    tr = config.get('Threshold')
-                    if tr:
-                        try: threshold = float(tr)
-                        except: pass
-                    break
-    except:
-        pass
-    return re_check, threshold
-
 def is_mosaic(path, threshold):
-    """画像解析ロジック"""
+    """高解像度 Harris Corner 判定ロジック"""
     if not path or not os.path.exists(path):
         return False, 0, 0, 0
     try:
@@ -90,64 +53,84 @@ def is_mosaic(path, threshold):
             if M["m00"] != 0:
                 points.append((int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])))
 
-        pts = len(points)
-        if not (100 < pts < 5000):
-            return False, coverage, 0, pts
+        pt_count = len(points)
+        if not (100 < pt_count < 5000):
+            return False, coverage, 0, pt_count
 
         x_coords = [p[0] for p in points]
-        alignment = round(sum(count for val, count in Counter(x_coords).most_common(20)) / pts, 3)
+        alignment = round(sum(count for val, count in Counter(x_coords).most_common(20)) / pt_count, 3)
         
-        result = (coverage >= threshold and alignment > 0.18)
-        return result, coverage, alignment, pts
-    except:
+        return (coverage >= threshold and alignment > 0.18), coverage, alignment, pt_count
+    except Exception as e:
+        log.debug(f"Analysis error: {e}")
         return False, 0, 0, 0
 
 def main():
-    log.info("Mosaic Detector Plugin Started")
-    re_check, threshold = get_config()
+    # stdinから接続情報を取得
+    json_input = json.loads(sys.stdin.read())
+    client = StashInterface(json_input["server_connection"])
+    
+    log.info("Mosaic Detector: Starting task...")
+
+    # 設定取得
+    plugin_config = client.get_configuration().get("plugins", {}).get("Mosaic Detector", {})
+    re_check = str(plugin_config.get("ReCheckMode", "false")).lower() == "true"
+    try:
+        threshold = float(plugin_config.get("Threshold", 0.15))
+    except:
+        threshold = 0.15
+
     log.info(f"Config: Mode={'RE-CHECK' if re_check else 'NEW ONLY'}, Threshold={threshold}")
-    
-    data = stash_query('{ allTags { id name } }')
-    tags_map = {t['name']: t['id'] for t in data.get('allTags', [])} if data else {}
-    m_id, n_id = tags_map.get(TAG_MOSAIC), tags_map.get(TAG_NO_MOSAIC)
 
-    if not m_id or not n_id:
-        log.error(f"Required tags '{TAG_MOSAIC}' or '{TAG_NO_MOSAIC}' not found.")
-        return
+    # タグID取得 (StashItem.TAG を使用して明示的に取得)
+    m_tag = client.find_tag(TAG_MOSAIC, create=True)
+    n_tag = client.find_tag(TAG_NO_MOSAIC, create=True)
+    m_id, n_id = str(m_tag["id"]), str(n_tag["id"])
 
-    log.info("Fetching image list from Stash...")
-    res = stash_query('{ allImages { id tags { id } } }')
-    all_imgs = res.get('allImages', []) if res else []
+    # 全画像取得 (StashItem.IMAGE を指定)
+    log.info("Fetching images from Stash...")
+    all_images = client.find_images(filter={"per_page": -1}, get_count=False)
     
-    targets = [i for i in all_imgs if re_check or not any(t['id'] in [m_id, n_id] for t in i.get('tags', []))]
+    targets = []
+    for img in all_images:
+        current_tids = [str(t["id"]) for t in img.get("tags", [])]
+        if re_check or (m_id not in current_tids and n_id not in current_tids):
+            targets.append(img)
+
     total = len(targets)
-    log.info(f"Targeting {total} images for analysis.")
+    log.info(f"Target count: {total} images.")
 
+    # 解析ループ
     for count, item in enumerate(targets, 1):
-        img_id = item['id']
-        detail = stash_query('query G($id: ID){ findImage(id: $id){ files { path } tags { id } } }', {"id": img_id})
-        if not detail or not detail['findImage']: continue
-        
-        img_data = detail['findImage']
-        path = img_data['files'][0]['path']
+        img_id = item["id"]
+        img_detail = client.find_image(img_id)
+        if not img_detail or not img_detail.get("files"): continue
+            
+        path = img_detail["files"][0]["path"]
         file_name = os.path.basename(path)
-        current_tags = [t['id'] for t in img_data.get('tags', [])]
+        current_tids = [str(t["id"]) for t in img_detail.get("tags", [])]
 
         is_m, cov, alg, pts = is_mosaic(path, threshold)
         new_tag_id = m_id if is_m else n_id
         
-        clean_tags = [tid for tid in current_tags if tid not in [m_id, n_id]]
+        # タグの完全洗浄と差し替え
+        clean_tags = [tid for tid in current_tids if tid not in [m_id, n_id]]
         final_tags = clean_tags + [new_tag_id]
 
-        status_update = ""
-        if set(current_tags) != set(final_tags):
-            stash_query('mutation U($id:ID!,$t:[ID!]){ imageUpdate(input:{id:$id,tag_ids:$t}){id} }', 
-                        {"id": img_id, "tags": final_tags})
-            status_update = " (Tag Updated)"
+        status_label = ""
+        # 文字列比較で確実な更新判定
+        if set(current_tids) != set(final_tags):
+            # 確実なGraphQL呼び出し
+            mutation = """
+            mutation Update($id: ID!, $tags: [ID!]) {
+                imageUpdate(input: { id: $id, tag_ids: $tags }) { id }
+            }
+            """
+            client.call_gql(mutation, {"id": img_id, "tags": final_tags})
+            status_label = " (Updated)"
 
-        label = "[MOSAIC]" if is_m else "[CLEAN] "
-        # stashapi.log を使って出力
-        log.info(f"[{count}/{total}] {label} cov:{cov} alg:{alg} pts:{pts} - {file_name}{status_update}")
+        result_text = "[MOSAIC]" if is_m else "[CLEAN] "
+        log.info(f"[{count}/{total}] {result_text} cov:{cov} alg:{alg} pts:{pts} - {file_name}{status_label}")
 
     log.info("--- Mosaic Detection Task Completed ---")
 
