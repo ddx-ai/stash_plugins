@@ -44,50 +44,72 @@ def get_config():
 
 def is_mosaic(path):
     """
-    高精度版：解像度が低い、または目が細かいモザイクを検出
+    グリッド解析による高精度モザイク判定
+    普通の画像（高精細なテクスチャ）をスルーし、人工的なモザイクのみを狙い撃ちします
     """
     if not path or not os.path.exists(path): return False
     try:
         img = cv2.imread(path)
         if img is None: return False
         
-        # 1. 小さなモザイクを潰さないよう、高解像度で再描画
-        img_res = cv2.resize(img, (1024, 1024))
+        # 1. 解析用サイズ
+        img_res = cv2.resize(img, (512, 512))
         gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY)
         
-        # 2. 適応型二値化でタイルの輪郭を強調 (サムネイル対策)
-        # 影や明るさに左右されず、エッジを抽出
-        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                     cv2.THRESH_BINARY_INV, 11, 2)
+        # 2. エッジの方向性を解析（モザイクは水平・垂直のエッジが極端に多い）
+        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
         
-        # 3. モルフォロジー演算で細かいノイズを除去しつつタイルを繋ぐ
+        # 3. 勾配の強さを計算
+        mag = np.hypot(sobelx, sobely)
+        mag = np.uint8(mag / (mag.max() if mag.max() > 0 else 1) * 255)
+        
+        # 二値化して塊を抽出
+        _, thresh = cv2.threshold(mag, 50, 255, cv2.THRESH_BINARY)
         kernel = np.ones((3,3), np.uint8)
         dilated = cv2.dilate(thresh, kernel, iterations=1)
         
-        # 4. 輪郭抽出
         contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        mosaic_candidate_count = 0
+        mosaic_cells = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            # 240px相当だと、タイルの1粒はかなり小さい(5-500px程度)
-            if 5 < area < 800: 
-                peri = cv2.arcLength(cnt, True)
-                if peri == 0: continue
-                # 四角形に近いかどうかを判定 (近似の精度を上げる)
-                approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+            # 小さなタイルの粒（5〜400ピクセル程度）をターゲットにする
+            if 10 < area < 400:
+                # 形状の矩形度（どれだけ正方形・長方形に近いか）を確認
+                x, y, w, h = cv2.boundingRect(cnt)
+                rect_area = w * h
+                extent = float(area) / rect_area # 占有率
+                aspect_ratio = float(w) / h # アスペクト比
                 
-                # 四角形（タイル）特有の形状をカウント
-                if 4 <= len(approx) <= 8:
-                    mosaic_candidate_count += 1
-                    
-        # 判定しきい値
-        # 240pxで判別しにくい細かいものはタイルの数自体が多くなる傾向にあります
-        # ここでは50個以上の「タイルの粒」が見つかればモザイクと判定します
-        return mosaic_candidate_count > 50
+                # 「四角に近い」かつ「極端に細長くない」ものを抽出
+                if extent > 0.6 and 0.5 < aspect_ratio < 2.0:
+                    mosaic_cells.append((x, y, w, h))
+
+        if len(mosaic_cells) < 30:
+            return False
+
+        # --- 決定的な「グリッド性」のチェック ---
+        # 近くにあるタイルの粒同士が、同じようなサイズ(w, h)を持っているかを比較
+        similar_size_count = 0
+        for i in range(len(mosaic_cells)):
+            for j in range(i + 1, min(i + 20, len(mosaic_cells))): # 近傍のみ比較
+                w1, h1 = mosaic_cells[i][2], mosaic_cells[i][3]
+                w2, h2 = mosaic_cells[j][2], mosaic_cells[j][3]
+                
+                # 幅と高さの差が20%以内なら「同じ規格のタイル」とみなす
+                if abs(w1 - w2) < (w1 * 0.2) and abs(h1 - h2) < (h1 * 0.2):
+                    similar_size_count += 1
+        
+        # 自然画ならサイズがバラバラになるが、モザイクなら均一になる
+        # 総数に対する「揃っている度合い」で判定
+        score = similar_size_count / len(mosaic_cells)
+        
+        # スコア(密な一致度)としきい値を調整
+        # 240pxで判別しにくいものはこの一致度が高くなる傾向があります
+        return len(mosaic_cells) > 40 and score > 1.2
 
     except Exception as e:
-        sys.stderr.write(f"Analyze Error: {e}\n")
         return False
 
 def main():
