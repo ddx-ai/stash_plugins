@@ -2,16 +2,11 @@ name: Mosaic Detector
 description: Detects mosaics in images
 version: 1.0
 
+# Taskの枠組みを使わず、直接実行コマンドだけを定義
+exec:
+  - python
+  - "{pluginDir}/detect.py"
+
 tasks:
   - name: "Scan Mosaics"
-    description: "Scan images for mosaics"
-    # ここです。execとargumentsを同じ階層に並べます
-    exec:
-      - python
-      - "{pluginDir}/detect.py"
-    # UIに表示するためのパラメータ
-    parameters:
-      - name: ReCheck
-        description: "すでに判定済みの画像も再チェックする"
-        type: Boolean
-        default: false
+    description: "モザイク判定を開始します（判定済みの扱いはPy側で設定）"
