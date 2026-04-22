@@ -1,6 +1,6 @@
 name: Mosaic Detector
-description: "高解像度解析によりモザイクを検出します。"
-version: 1.3
+description: "高解像度解析によりモザイクを検出します。詳細な判定ログを出力します。"
+version: 1.4
 exec:
   - python
   - "{pluginDir}/detect.py"
