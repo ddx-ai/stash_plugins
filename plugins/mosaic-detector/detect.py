@@ -43,31 +43,51 @@ def get_config():
     return False
 
 def is_mosaic(path):
-    """タイル密度解析"""
+    """
+    高精度版：解像度が低い、または目が細かいモザイクを検出
+    """
     if not path or not os.path.exists(path): return False
     try:
         img = cv2.imread(path)
         if img is None: return False
-        img_res = cv2.resize(img, (512, 512))
+        
+        # 1. 小さなモザイクを潰さないよう、高解像度で再描画
+        img_res = cv2.resize(img, (1024, 1024))
         gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY)
-        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        mag = np.hypot(sobelx, sobely)
-        mag = np.uint8(mag / (mag.max() if mag.max() > 0 else 1) * 255)
-        kernel = np.ones((5,5), np.uint8)
-        dilated = cv2.dilate(mag, kernel, iterations=1)
+        
+        # 2. 適応型二値化でタイルの輪郭を強調 (サムネイル対策)
+        # 影や明るさに左右されず、エッジを抽出
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                     cv2.THRESH_BINARY_INV, 11, 2)
+        
+        # 3. モルフォロジー演算で細かいノイズを除去しつつタイルを繋ぐ
+        kernel = np.ones((3,3), np.uint8)
+        dilated = cv2.dilate(thresh, kernel, iterations=1)
+        
+        # 4. 輪郭抽出
         contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
         mosaic_candidate_count = 0
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if 40 < area < 3000:
+            # 240px相当だと、タイルの1粒はかなり小さい(5-500px程度)
+            if 5 < area < 800: 
                 peri = cv2.arcLength(cnt, True)
                 if peri == 0: continue
-                approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
-                if 4 <= len(approx) <= 12:
+                # 四角形に近いかどうかを判定 (近似の精度を上げる)
+                approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+                
+                # 四角形（タイル）特有の形状をカウント
+                if 4 <= len(approx) <= 8:
                     mosaic_candidate_count += 1
-        return mosaic_candidate_count > 35
-    except:
+                    
+        # 判定しきい値
+        # 240pxで判別しにくい細かいものはタイルの数自体が多くなる傾向にあります
+        # ここでは50個以上の「タイルの粒」が見つかればモザイクと判定します
+        return mosaic_candidate_count > 50
+
+    except Exception as e:
+        sys.stderr.write(f"Analyze Error: {e}\n")
         return False
 
 def main():
