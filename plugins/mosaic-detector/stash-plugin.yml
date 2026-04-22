@@ -1,17 +1,18 @@
 name: Mosaic Detector
-description: 画像内のモザイクを自動検出し、Mosaic/NoMosaicタグを付与します。
-version: 1.1
+description: "1000px以上の高解像度解析により、微細な正方形モザイクを検出します。"
+version: 1.2
 
 exec:
   - python
   - "{pluginDir}/detect.py"
 
+# Stashの仕様に合わせて、エラーの出にくい最小限の構成
 settings:
   ReCheckMode:
     displayName: 再判定モード (Re-Check Mode)
-    description: "ON: すべての画像を再判定 / OFF: 未判定（タグなし）のみスキャン"
+    description: "ON: 全件再スキャン / OFF: 未判定のみ"
     type: BOOLEAN
 
 tasks:
   - name: "Scan Mosaics"
-    description: "ライブラリ内の画像をスキャンしてモザイク判定を行います。"
+    description: "ライブラリ内の画像を精密スキャンします。"
