@@ -32,7 +32,7 @@ def stash_query(query, variables=None):
         return None
 
 def get_config():
-    """StashのSettingsから設定を取得。値がない場合はデフォルト値を返す"""
+    """StashのSettingsから設定を取得。文字列を小数に変換する"""
     try:
         input_data = sys.stdin.read()
         if input_data:
@@ -42,13 +42,20 @@ def get_config():
             
             re_check = config.get('ReCheckMode', False)
             
-            # Thresholdが空または未設定の場合は 0.15 を使う
+            # 文字列として取得し、小数に変換を試みる
             threshold_raw = config.get('Threshold')
-            threshold = float(threshold_raw) if threshold_raw is not None else 0.15
+            try:
+                if threshold_raw and str(threshold_raw).strip():
+                    threshold = float(threshold_raw)
+                else:
+                    threshold = 0.15
+            except ValueError:
+                # 数値として正しくない文字列が入っていた場合のバックアップ
+                threshold = 0.15
             
             return re_check, threshold
-    except:
-        pass
+    except Exception as e:
+        sys.stderr.write(f"Config Load Warning: {e}\n")
     return False, 0.15
 
 def is_mosaic(path, threshold):
