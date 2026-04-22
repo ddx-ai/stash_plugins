@@ -74,6 +74,7 @@ def main():
     re_check_mode = get_config()
     sys.stderr.write(f"--- Mode: {'RE-CHECK' if re_check_mode else 'NEW ONLY'} ---\n")
     
+    # 1. タグID取得
     data = stash_query('{ allTags { id name } }')
     tags_map = {t['name']: t['id'] for t in data.get('allTags', [])} if data else {}
     m_id, n_id = tags_map.get(TAG_MOSAIC), tags_map.get(TAG_NO_MOSAIC)
@@ -82,16 +83,33 @@ def main():
         sys.stderr.write("Error: Mosaic/NoMosaic tags missing.\n")
         return
 
+    # 2. 画像取得クエリの修正
     if re_check_mode:
         res = stash_query('{ allImages { id } }')
         images = res.get('allImages', []) if res else []
     else:
-        q = 'query U($ids: [ID!]) { findImages(image_filter: { tags: { modifier: NOT_INCLUDES, value: $ids } }) { images { id } } }'
-        res = stash_query(q, {"ids": [m_id, n_id]})
+        # 400エラーを回避するため、より標準的なフィルター形式に変更
+        q = """
+        query Unchecked($tag_filter: TagFilterType!) {
+          findImages(image_filter: { tags: $tag_filter }) {
+            images { id }
+          }
+        }
+        """
+        # 「MosaicもNoMosaicも付いていない」画像を抽出
+        variables = {
+            "tag_filter": {
+                "modifier": "NOT_INCLUDES",
+                "value": [m_id, n_id]
+            }
+        }
+        res = stash_query(q, variables)
         images = res['findImages']['images'] if res else []
 
     total = len(images)
     sys.stderr.write(f"Target: {total} images.\n")
+
+    # (以下、ループ処理はそのまま)
 
     for count, item in enumerate(images, 1):
         img_id = item['id']
