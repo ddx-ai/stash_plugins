@@ -4,7 +4,9 @@ import numpy as np
 import os
 import sys
 import json
+from collections import Counter
 
+# --- 設定とタグ ---
 STASH_PORT = os.environ.get("STASH_PORT", "9999")
 STASH_URL = f"http://127.0.0.1:{STASH_PORT}/graphql"
 TAG_MOSAIC = "Mosaic"
@@ -20,23 +22,21 @@ sys.stdout = Logger()
 def stash_query(query, variables=None):
     headers = {"Content-Type": "application/json"}
     payload = {'query': query}
-    if variables:
-        payload['variables'] = variables
+    if variables: payload['variables'] = variables
     try:
-        res = requests.post(STASH_URL, json=payload, headers=headers, timeout=20)
+        res = requests.post(STASH_URL, json=payload, headers=headers, timeout=30)
         return res.json().get('data')
     except:
         return None
 
 def get_config():
-    """StashのSettingsからReCheckModeを取得"""
+    """StashのSettingsから設定を取得。失敗時はFalseを返す"""
     try:
         input_data = sys.stdin.read()
         if input_data:
             data = json.loads(input_data)
             plugins = data.get('server_config', {}).get('plugins', {})
             config = plugins.get('Mosaic Detector', {})
-            # ここでデフォルト値を指定（辞書のgetメソッドの第2引数）
             return config.get('ReCheckMode', False)
     except:
         pass
@@ -44,77 +44,64 @@ def get_config():
 
 def is_mosaic(path):
     """
-    グリッド解析による高精度モザイク判定
-    普通の画像（高精細なテクスチャ）をスルーし、人工的なモザイクのみを狙い撃ちします
+    高精度コーナー距離解析：
+    1000px以上の元データにある「正方形の角」の規則的な並びを検出します。
     """
     if not path or not os.path.exists(path): return False
     try:
         img = cv2.imread(path)
         if img is None: return False
         
-        # 1. 解析用サイズ
-        img_res = cv2.resize(img, (512, 512))
+        # 1. 1000px以上のサイズを維持して解析
+        h, w = img.shape[:2]
+        target_size = max(h, w, 1024)
+        if target_size > 2048: target_size = 2048 # 重すぎ防止のキャップ
+        img_res = cv2.resize(img, (target_size, target_size))
         gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY)
         
-        # 2. エッジの方向性を解析（モザイクは水平・垂直のエッジが極端に多い）
-        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        
-        # 3. 勾配の強さを計算
-        mag = np.hypot(sobelx, sobely)
-        mag = np.uint8(mag / (mag.max() if mag.max() > 0 else 1) * 255)
-        
-        # 二値化して塊を抽出
-        _, thresh = cv2.threshold(mag, 50, 255, cv2.THRESH_BINARY)
-        kernel = np.ones((3,3), np.uint8)
-        dilated = cv2.dilate(thresh, kernel, iterations=1)
-        
-        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        mosaic_cells = []
+        # 2. ハリスコーナー検出：正方形タイルの「角」を強調
+        dst = cv2.cornerHarris(gray, 2, 3, 0.04)
+        dst = cv2.dilate(dst, None)
+        ret, dst = cv2.threshold(dst, 0.01 * dst.max(), 255, 0)
+        dst = np.uint8(dst)
+
+        # 3. 検出された「角」の座標リストを作成
+        contours, _ = cv2.findContours(dst, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        points = []
         for cnt in contours:
-            area = cv2.contourArea(cnt)
-            # 小さなタイルの粒（5〜400ピクセル程度）をターゲットにする
-            if 10 < area < 400:
-                # 形状の矩形度（どれだけ正方形・長方形に近いか）を確認
-                x, y, w, h = cv2.boundingRect(cnt)
-                rect_area = w * h
-                extent = float(area) / rect_area # 占有率
-                aspect_ratio = float(w) / h # アスペクト比
-                
-                # 「四角に近い」かつ「極端に細長くない」ものを抽出
-                if extent > 0.6 and 0.5 < aspect_ratio < 2.0:
-                    mosaic_cells.append((x, y, w, h))
-
-        if len(mosaic_cells) < 30:
-            return False
-
-        # --- 決定的な「グリッド性」のチェック ---
-        # 近くにあるタイルの粒同士が、同じようなサイズ(w, h)を持っているかを比較
-        similar_size_count = 0
-        for i in range(len(mosaic_cells)):
-            for j in range(i + 1, min(i + 20, len(mosaic_cells))): # 近傍のみ比較
-                w1, h1 = mosaic_cells[i][2], mosaic_cells[i][3]
-                w2, h2 = mosaic_cells[j][2], mosaic_cells[j][3]
-                
-                # 幅と高さの差が20%以内なら「同じ規格のタイル」とみなす
-                if abs(w1 - w2) < (w1 * 0.2) and abs(h1 - h2) < (h1 * 0.2):
-                    similar_size_count += 1
+            M = cv2.moments(cnt)
+            if M["m00"] != 0:
+                points.append((int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])))
         
-        # 自然画ならサイズがバラバラになるが、モザイクなら均一になる
-        # 総数に対する「揃っている度合い」で判定
-        score = similar_size_count / len(mosaic_cells)
-        
-        # スコア(密な一致度)としきい値を調整
-        # 240pxで判別しにくいものはこの一致度が高くなる傾向があります
-        return len(mosaic_cells) > 40 and score > 1.2
+        if len(points) < 120: return False
 
-    except Exception as e:
+        # 4. 角と角の距離をサンプリング（規則性の証明）
+        distances = []
+        sample_points = points[:600]
+        for i in range(len(sample_points)):
+            p1 = sample_points[i]
+            for j in range(i + 1, min(i + 25, len(sample_points))):
+                p2 = sample_points[j]
+                dist = np.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
+                # 正方形タイルらしい距離(5px〜60px)を記録
+                if 8 < dist < 60:
+                    distances.append(round(dist, 0))
+
+        if not distances: return False
+
+        # 最も頻出する距離の出現回数を確認
+        dist_counts = Counter(distances)
+        common_dist, count = dist_counts.most_common(1)[0]
+
+        # 判定：同じ距離に配置された「角」が50個以上あれば人工的なモザイクと断定
+        return count > 50
+
+    except:
         return False
 
 def main():
     re_check_mode = get_config()
-    sys.stderr.write(f"--- Mode: {'RE-CHECK' if re_check_mode else 'NEW ONLY'} ---\n")
+    sys.stderr.write(f"--- High-Res Scan Mode: {'RE-CHECK' if re_check_mode else 'NEW ONLY'} ---\n")
     
     # 1. タグID取得
     data = stash_query('{ allTags { id name } }')
@@ -122,53 +109,52 @@ def main():
     m_id, n_id = tags_map.get(TAG_MOSAIC), tags_map.get(TAG_NO_MOSAIC)
 
     if not m_id or not n_id:
-        sys.stderr.write("Error: Mosaic/NoMosaic tags missing.\n")
+        sys.stderr.write(f"Error: Tags '{TAG_MOSAIC}' and '{TAG_NO_MOSAIC}' must exist.\n")
         return
 
-    # 2. 【APIエラー回避策】まず全画像のIDとタグ情報を一括取得
-    # 複雑なフィルターをAPIに投げず、Python側で仕分けます
-    sys.stderr.write("Fetching image list from Stash...\n")
+    # 2. 全画像を取得してPython側で安全にフィルタリング
+    sys.stderr.write("Fetching image list...\n")
     res = stash_query('{ allImages { id tags { id } } }')
     all_images = res.get('allImages', []) if res else []
     
-    images = []
+    targets = []
     if re_check_mode:
-        images = all_images
+        targets = all_images
     else:
-        # MosaicもNoMosaicも持っていない画像だけを抽出（Python側で判定）
         for img in all_images:
-            existing_tag_ids = [t['id'] for t in img.get('tags', [])]
-            if m_id not in existing_tag_ids and n_id not in existing_tag_ids:
-                images.append(img)
+            tag_ids = [t['id'] for t in img.get('tags', [])]
+            if m_id not in tag_ids and n_id not in tag_ids:
+                targets.append(img)
 
-    total = len(images)
-    sys.stderr.write(f"Target: {total} images (Filtered from {len(all_images)} total).\n")
+    total = len(targets)
+    sys.stderr.write(f"Analyzing {total} images...\n")
 
-    # 3. ループ処理
-    for count, item in enumerate(images, 1):
+    # 3. 解析ループ
+    for count, item in enumerate(targets, 1):
         img_id = item['id']
-        # ファイルパス取得
         detail = stash_query('query G($id: ID){ findImage(id: $id){ files { path } tags { id } } }', {"id": img_id})
         if not detail or not detail['findImage']: continue
         
         img_data = detail['findImage']
         path = img_data['files'][0]['path']
-        current_tag_ids = [t['id'] for t in img_data.get('tags', [])]
+        current_tags = [t['id'] for t in img_data.get('tags', [])]
 
+        # 判定実行
         is_m = is_mosaic(path)
-        new_tag_id = m_id if is_m else n_id
+        new_id = m_id if is_m else n_id
         
-        clean_tag_ids = [tid for tid in current_tag_ids if tid not in [m_id, n_id]]
-        updated_tag_ids = clean_tag_ids + [new_tag_id]
+        # 既存のMosaic/NoMosaicタグを入れ替える
+        clean_tags = [tid for tid in current_tags if tid not in [m_id, n_id]]
+        final_tags = clean_tags + [new_id]
 
-        if set(current_tag_ids) != set(updated_tag_ids):
+        if set(current_tags) != set(final_tags):
             stash_query('mutation U($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }', 
-                        {"id": img_id, "tags": updated_tag_ids})
+                        {"id": img_id, "tags": final_tags})
 
         if count % 100 == 0:
-            sys.stderr.write(f"Progress: {count}/{total} done.\n")
+            sys.stderr.write(f"Progress: {count}/{total} done...\n")
 
-    sys.stderr.write("--- Scan Finished --- \n")
+    sys.stderr.write("--- Task Finished ---\n")
 
 if __name__ == "__main__":
     main()
