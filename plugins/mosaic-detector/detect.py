@@ -32,52 +32,42 @@ def stash_query(query, variables=None):
         return None
 
 def get_config():
-    """設定を全探索し、現在の状況をログに出力する"""
+    """Stashが提供する'args'階層から設定を抽出する"""
     re_check = False
     threshold = 0.15
     
     try:
-        # stdinから全てのデータを取り込む
         if not sys.stdin.isatty():
             raw_input = sys.stdin.read()
             if raw_input:
                 data = json.loads(raw_input)
-                # ログに届いたデータ構造を出力（デバッグ用）
-                sys.stderr.write(f"DEBUG: Input Data Keys: {list(data.keys())}\n")
                 
-                # プラグイン設定の階層を深く探索
-                # server_config -> plugins -> Mosaic Detector
-                plugins_config = data.get('server_config', {}).get('plugins', {})
-                config = plugins_config.get('Mosaic Detector', {})
+                # ログから判明した 'args' 階層を探索
+                # Stashのタスク実行時は args -> server_config の中にプラグイン設定が入ります
+                args = data.get('args', {})
+                config = args.get('server_config', {}).get('plugins', {}).get('Mosaic Detector', {})
                 
+                if not config:
+                    # バックアップ：API経由で直接取得を試みる
+                    res = stash_query('{ configuration { plugins } }')
+                    if res:
+                        config = res.get('configuration', {}).get('plugins', {}).get('Mosaic Detector', {})
+
                 if config:
-                    sys.stderr.write(f"DEBUG: Plugin Config: {config}\n")
-                    # キー名が小文字や大文字でズレている可能性を考慮して全探索
+                    sys.stderr.write(f"DEBUG: Found Config: {config}\n")
+                    # 大文字小文字を無視してキーを探索
                     for k, v in config.items():
                         if k.lower() == 'recheckmode':
                             re_check = str(v).lower() == 'true'
                         if k.lower() == 'threshold':
-                            try: threshold = float(v)
-                            except: pass
+                            try:
+                                threshold = float(v)
+                            except:
+                                threshold = 0.15
                     
                     return re_check, threshold
     except Exception as e:
-        sys.stderr.write(f"DEBUG: Config read error: {e}\n")
-
-    # 失敗した場合の最終手段：もう一度API経由で直接取得
-    try:
-        res = stash_query('{ configuration { plugins } }')
-        if res:
-            p_config = res.get('configuration', {}).get('plugins', {}).get('Mosaic Detector', {})
-            if p_config:
-                for k, v in p_config.items():
-                    if k.lower() == 'recheckmode':
-                        re_check = str(v).lower() == 'true'
-                    if k.lower() == 'threshold':
-                        try: threshold = float(v)
-                        except: pass
-    except:
-        pass
+        sys.stderr.write(f"DEBUG: Config Error: {e}\n")
 
     return re_check, threshold
 
