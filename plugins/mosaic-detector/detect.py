@@ -3,9 +3,8 @@ import json
 import os
 import cv2
 import numpy as np
-from collections import Counter
 
-# --- パス解決 ---
+# --- Stashライブラリパスの解決 ---
 plugin_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(plugin_dir, ".."))
 
@@ -26,52 +25,59 @@ except:
     json_input = {}
 
 def is_mosaic(path, threshold):
-    """正方形ブロック構造の周期性解析によるモザイク判定"""
+    """
+    正方形ブロックの周期性を解析するロジック (v2.0)
+    オーバーフロー対策済・正規化スコア算出
+    """
     if not path or not os.path.exists(path): return False, 0, 0, 0
     try:
+        # 画像読み込み
         img = cv2.imread(path)
         if img is None: return False, 0, 0, 0
         
-        # 処理の安定化のためサイズ統一
-        target_size = 512 
+        # 解析サイズを512pxに固定（処理速度と精度のバランス）
+        target_size = 512
         img_res = cv2.resize(img, (target_size, target_size))
         gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY)
 
-        # エッジ検出（縦横のラインを強調）
-        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        mag = np.sqrt(sobel_x**2 + sobel_y**2)
-        mag = np.uint8(np.absolute(mag))
+        # 1. 鮮鋭度の高いエッジ（格子状の線）を抽出
+        # CV_64Fを使用して計算中のオーバーフローを防止
+        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+        mag = np.absolute(laplacian)
 
-        # 縦横の投影（プロジェクション）による周期性確認
-        # モザイクがあれば、特定のピクセル間隔で高いピークが出る
+        # 2. 縦横の投影（プロジェクション）
+        # 軸方向に合計を取り、エッジの分布を調べる
         proj_x = np.sum(mag, axis=0)
         proj_y = np.sum(mag, axis=1)
 
-        def analyze_periodicity(proj):
-            # 差分を取ってエッジの立ち上がりを強調
-            diff = np.abs(np.diff(proj))
-            # 自己相関に似た手法で「一定の間隔でエッジがあるか」をスコア化
-            # 8px〜32px程度の正方形ブロックを想定
-            max_score = 0
-            for block_size in range(8, 32):
-                score = 0
-                for i in range(0, len(diff) - block_size, block_size):
-                    score += diff[i]
-                max_score = max(max_score, score)
-            return max_score
+        def get_periodicity_score(proj):
+            # データの正規化（画像の明るさの影響を排除）
+            p_min, p_max = np.min(proj), np.max(proj)
+            if p_max - p_min < 1e-5: return 0
+            norm_proj = (proj - p_min) / (p_max - p_min)
 
-        score_x = analyze_periodicity(proj_x)
-        score_y = analyze_periodicity(proj_y)
+            # 周期性のスキャン（ブロックサイズ 8px 〜 32px を想定）
+            best_score = 0
+            for step in range(8, 33):
+                # 一定間隔(step)ごとの強度の平均を計算（オーバーフロー防止）
+                score = np.mean(norm_proj[::step])
+                if score > best_score:
+                    best_score = score
+            return best_score
+
+        score_x = get_periodicity_score(proj_x)
+        score_y = get_periodicity_score(proj_y)
+
+        # 3. 最終判定スコア算出 (0.0 〜 1.0)
+        # 縦横両方の規則性を合成
+        final_score = round((score_x + score_y) / 2, 3)
         
-        # 最終スコアの正規化（画像全体の輝度やコントラストに依存しないよう調整）
-        final_score = (score_x + score_y) / (np.mean(gray) + 1) / 1000
+        # 判定 (デフォルトしきい値目安: 0.5)
+        is_m = final_score >= threshold
         
-        # 判定しきい値の調整（0.15前後で調整）
-        is_m = final_score > threshold
-        
-        return is_m, round(final_score, 3), 0, 0
+        return is_m, final_score, 0, 0
     except Exception as e:
+        # 予期せぬエラー時はログを出してスキップ
         return False, 0, 0, 0
 
 def main():
@@ -79,30 +85,32 @@ def main():
         sys.stderr.write("ERROR: No server connection info\n")
         return
 
+    # StashInterface初期化 (v0.31.1対応)
     client = StashInterface(json_input["server_connection"])
-    log.info("Mosaic Detector: Starting task for Stash v0.31.1...")
+    log.info("Mosaic Detector: Starting task (Frequency Analysis Mode)...")
 
-    # 設定取得
+    # --- 設定取得 ---
     try:
         full_config = client.get_configuration()
+        # フォルダ名/yml名が mosaic-detector であることを前提
         plugin_config = full_config.get("plugins", {}).get("mosaic-detector", {})
     except:
         plugin_config = {}
 
     re_check = str(plugin_config.get("ReCheckMode", "false")).lower() == "true"
     try:
-        threshold = float(plugin_config.get("Threshold", 0.15))
+        # 新ロジックでは 0.5 程度が標準的なしきい値になります
+        threshold = float(plugin_config.get("Threshold", 0.5))
     except:
-        threshold = 0.15
+        threshold = 0.5
 
-    # タグID取得
+    # --- タグ取得 ---
     m_tag = client.find_tag("Mosaic", create=True)
     n_tag = client.find_tag("NoMosaic", create=True)
     m_id, n_id = str(m_tag["id"]), str(n_tag["id"])
 
-    # --- v0.31.1 用 互換クエリ ---
-    # フィルタを使わず、全件の基本情報を取得（結合を減らしてSQLの奔流を最短化）
-    log.info("Fetching image list...")
+    # --- 画像リスト取得 (v0.31.1 互換クエリ) ---
+    log.info("Fetching image list from Stash...")
     query = """
     query {
       allImages {
@@ -115,7 +123,7 @@ def main():
     res = client.call_GQL(query)
     all_images = res.get('allImages', [])
 
-    # Python側で高速フィルタリング
+    # Python側で未判定分をフィルタリング
     targets = []
     for i in all_images:
         current_tids = [str(t["id"]) for t in i.get("tags", [])]
@@ -123,9 +131,9 @@ def main():
             targets.append(i)
 
     total = len(targets)
-    log.info(f"Target count: {total} images. Starting analysis...")
+    log.info(f"Target count: {total} images. Using Threshold: {threshold}")
 
-    # 解析ループ
+    # --- 解析ループ ---
     for count, item in enumerate(targets, 1):
         if not item.get("files"): continue
         
@@ -133,12 +141,15 @@ def main():
         path = item["files"][0]["path"]
         current_tids = [str(t["id"]) for t in item.get("tags", [])]
 
-        is_m, cov, alg, pts = is_mosaic(path, threshold)
+        # 判定実行
+        is_m, score, _, _ = is_mosaic(path, threshold)
         new_tag_id = m_id if is_m else n_id
         
+        # 既存判定タグの除去と新タグの追加
         clean_tags = [tid for tid in current_tids if tid not in [m_id, n_id]]
         final_tags = clean_tags + [new_tag_id]
 
+        # 変更がある場合のみ更新
         status = ""
         if set(current_tids) != set(final_tags):
             mutation = """
@@ -150,7 +161,7 @@ def main():
             status = " (Updated)"
 
         label = "[MOSAIC]" if is_m else "[CLEAN] "
-        log.info(f"[{count}/{total}] {label} {os.path.basename(path)}{status}")
+        log.info(f"[{count}/{total}] {label} score:{score} - {os.path.basename(path)}{status}")
 
     log.info("--- Mosaic Detection Task Completed ---")
 
