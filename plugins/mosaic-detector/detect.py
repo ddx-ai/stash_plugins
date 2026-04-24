@@ -36,7 +36,7 @@ def is_mosaic(path, threshold):
         if img is None: return False, 0, 0, 0
         
         # 解析サイズを512pxに固定（処理速度と精度のバランス）
-        target_size = 512
+        target_size = 1024
         img_res = cv2.resize(img, (target_size, target_size))
         gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY)
 
