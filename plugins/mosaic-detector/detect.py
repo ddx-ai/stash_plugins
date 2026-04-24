@@ -26,38 +26,52 @@ except:
     json_input = {}
 
 def is_mosaic(path, threshold):
-    """Harris Corner 判定ロジック"""
+    """正方形ブロック構造の周期性解析によるモザイク判定"""
     if not path or not os.path.exists(path): return False, 0, 0, 0
     try:
         img = cv2.imread(path)
         if img is None: return False, 0, 0, 0
-        target_size = 1024
+        
+        # 処理の安定化のためサイズ統一
+        target_size = 512 
         img_res = cv2.resize(img, (target_size, target_size))
         gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY)
-        dst = cv2.cornerHarris(gray, 2, 3, 0.04)
-        dst = cv2.dilate(dst, None)
-        _, dst = cv2.threshold(dst, 0.01 * dst.max(), 255, 0)
-        dst = np.uint8(dst)
-        grid_dim = 32
-        block_size = target_size // grid_dim
-        active_blocks = 0
-        for y in range(0, target_size, block_size):
-            for x in range(0, target_size, block_size):
-                if cv2.countNonZero(dst[y:y+block_size, x:x+block_size]) >= 4:
-                    active_blocks += 1
-        coverage = round(active_blocks / (grid_dim * grid_dim), 3)
-        contours, _ = cv2.findContours(dst, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        points = []
-        for cnt in contours:
-            M = cv2.moments(cnt)
-            if M["m00"] != 0:
-                points.append((int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])))
-        pts = len(points)
-        if not (100 < pts < 5000): return False, coverage, 0, pts
-        x_coords = [p[0] for p in points]
-        alignment = round(sum(count for val, count in Counter(x_coords).most_common(20)) / pts, 3)
-        return (coverage >= threshold and alignment > 0.18), coverage, alignment, pts
-    except:
+
+        # エッジ検出（縦横のラインを強調）
+        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        mag = np.sqrt(sobel_x**2 + sobel_y**2)
+        mag = np.uint8(np.absolute(mag))
+
+        # 縦横の投影（プロジェクション）による周期性確認
+        # モザイクがあれば、特定のピクセル間隔で高いピークが出る
+        proj_x = np.sum(mag, axis=0)
+        proj_y = np.sum(mag, axis=1)
+
+        def analyze_periodicity(proj):
+            # 差分を取ってエッジの立ち上がりを強調
+            diff = np.abs(np.diff(proj))
+            # 自己相関に似た手法で「一定の間隔でエッジがあるか」をスコア化
+            # 8px〜32px程度の正方形ブロックを想定
+            max_score = 0
+            for block_size in range(8, 32):
+                score = 0
+                for i in range(0, len(diff) - block_size, block_size):
+                    score += diff[i]
+                max_score = max(max_score, score)
+            return max_score
+
+        score_x = analyze_periodicity(proj_x)
+        score_y = analyze_periodicity(proj_y)
+        
+        # 最終スコアの正規化（画像全体の輝度やコントラストに依存しないよう調整）
+        final_score = (score_x + score_y) / (np.mean(gray) + 1) / 1000
+        
+        # 判定しきい値の調整（0.15前後で調整）
+        is_m = final_score > threshold
+        
+        return is_m, round(final_score, 3), 0, 0
+    except Exception as e:
         return False, 0, 0, 0
 
 def main():
