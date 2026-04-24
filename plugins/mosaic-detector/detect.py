@@ -26,58 +26,70 @@ except:
 
 def is_mosaic(path, threshold):
     """
-    正方形ブロックの周期性を解析するロジック (v2.0)
-    オーバーフロー対策済・正規化スコア算出
+    縦横同期スキャン・ロジック (v3.0)
+    縦横の周期が一致することを条件に加え、誤判定を抑制
     """
     if not path or not os.path.exists(path): return False, 0, 0, 0
     try:
-        # 画像読み込み
         img = cv2.imread(path)
         if img is None: return False, 0, 0, 0
         
-        # 解析サイズを512pxに固定（処理速度と精度のバランス）
-        target_size = 1024
-        img_res = cv2.resize(img, (target_size, target_size))
+        # 比率を維持してリサイズ（正方形に潰さない）
+        # これにより、画像内のブロックが「正方形」であることを維持する
+        h, w = img.shape[:2]
+        target_size = 512
+        scale = target_size / max(h, w)
+        img_res = cv2.resize(img, (int(w * scale), int(h * scale)))
         gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY)
 
-        # 1. 鮮鋭度の高いエッジ（格子状の線）を抽出
-        # CV_64Fを使用して計算中のオーバーフローを防止
+        # エッジ抽出
         laplacian = cv2.Laplacian(gray, cv2.CV_64F)
         mag = np.absolute(laplacian)
 
-        # 2. 縦横の投影（プロジェクション）
-        # 軸方向に合計を取り、エッジの分布を調べる
+        # 投影
         proj_x = np.sum(mag, axis=0)
         proj_y = np.sum(mag, axis=1)
 
-        def get_periodicity_score(proj):
-            # データの正規化（画像の明るさの影響を排除）
+        def get_period_map(proj):
+            # 8px〜32pxの各サイズでスコアを算出してリスト化
             p_min, p_max = np.min(proj), np.max(proj)
-            if p_max - p_min < 1e-5: return 0
+            if p_max - p_min < 1e-5: return {}
             norm_proj = (proj - p_min) / (p_max - p_min)
-
-            # 周期性のスキャン（ブロックサイズ 8px 〜 32px を想定）
-            best_score = 0
+            
+            period_scores = {}
             for step in range(8, 33):
-                # 一定間隔(step)ごとの強度の平均を計算（オーバーフロー防止）
-                score = np.mean(norm_proj[::step])
-                if score > best_score:
-                    best_score = score
-            return best_score
+                # 平均を取ってスコア化
+                period_scores[step] = np.mean(norm_proj[::step])
+            return period_scores
 
-        score_x = get_periodicity_score(proj_x)
-        score_y = get_periodicity_score(proj_y)
+        scores_x = get_period_map(proj_x)
+        scores_y = get_period_map(proj_y)
 
-        # 3. 最終判定スコア算出 (0.0 〜 1.0)
-        # 縦横両方の規則性を合成
-        final_score = round((score_x + score_y) / 2, 3)
+        if not scores_x or not scores_y: return False, 0, 0, 0
+
+        # --- 縦横同期判定 ---
+        max_combined_score = 0
+        best_step = 0
         
-        # 判定 (デフォルトしきい値目安: 0.5)
+        for step in range(8, 33):
+            # 縦と横のスコアを掛け合わせる（両方高いサイズがあるかを探す）
+            # これにより「縦だけ」「横だけ」の周期性は除外される
+            combined = scores_x[step] * scores_y[step]
+            if combined > max_combined_score:
+                max_combined_score = combined
+                best_step = step
+
+        # スコアの正規化（0.0〜1.0）
+        # sqrtを取ることで、元のスケール感に戻す
+        final_score = round(np.sqrt(max_combined_score), 3)
+        
+        # 判定
+        # 同期を条件にすると、自然な画像では数値が極端に低くなるため
+        # しきい値は少し下げて 0.3 〜 0.4 あたりが目安になります
         is_m = final_score >= threshold
         
-        return is_m, final_score, 0, 0
-    except Exception as e:
-        # 予期せぬエラー時はログを出してスキップ
+        return is_m, final_score, best_step, 0
+    except Exception:
         return False, 0, 0, 0
 
 def main():
