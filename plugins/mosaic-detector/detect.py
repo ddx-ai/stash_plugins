@@ -26,26 +26,38 @@ except:
 
 def is_mosaic(path):
     """
-    縦横同期スキャン・ロジック (v3.1)
-    正方形ブロックの周期性を 0.0〜1.0 でスコア化
+    勾配角度フィルタリング付き・縦横同期スキャン (v4.0)
+    斜線（鉛筆画・ハッチング）を排除し、純粋な水平・垂直グリッドのみを抽出
     """
     if not path or not os.path.exists(path): return 0, 0
     try:
         img = cv2.imread(path)
         if img is None: return 0, 0
         
-        # 比率維持リサイズ（正方形性を保つ）
         h, w = img.shape[:2]
         target_size = 512
         scale = target_size / max(h, w)
         img_res = cv2.resize(img, (int(w * scale), int(h * scale)))
         gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY)
 
-        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
-        mag = np.absolute(laplacian)
+        # 1. 勾配の強度と「角度」を算出
+        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        
+        # 角度(radian)を計算
+        angles = np.arctan2(np.abs(sobel_y), np.abs(sobel_x)) * 180 / np.pi
+        mag = np.sqrt(sobel_x**2 + sobel_y**2)
 
-        proj_x = np.sum(mag, axis=0)
-        proj_y = np.sum(mag, axis=1)
+        # 2. 角度によるフィルタリング
+        # 垂直(90度付近)または水平(0度付近)のエッジだけを残す
+        # 鉛筆画の斜線（30〜60度付近）はここでゼロになる
+        tolerance = 15 # 許容誤差±15度
+        mask = ((angles < tolerance) | (angles > 90 - tolerance))
+        mag_filtered = np.where(mask, mag, 0)
+
+        # 3. 投影（フィルタリング後の強度を使用）
+        proj_x = np.sum(mag_filtered, axis=0)
+        proj_y = np.sum(mag_filtered, axis=1)
 
         def get_period_map(proj):
             p_min, p_max = np.min(proj), np.max(proj)
@@ -66,7 +78,6 @@ def is_mosaic(path):
                 max_combined_score = combined
                 best_step = step
 
-        # sqrtで正規化し 0.0〜1.0 の感度を調整
         final_score = round(np.sqrt(max_combined_score), 3)
         return final_score, best_step
     except:
