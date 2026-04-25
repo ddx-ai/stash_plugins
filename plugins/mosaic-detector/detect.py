@@ -97,7 +97,7 @@ def main():
     if not server: return
     client = StashInterface(server)
 
-    # UI設定のパース
+# --- UI設定のパース ---
     args = input_data.get("args", {})
     def get_arg(key, default, type_func):
         val = args.get(key)
@@ -109,16 +109,23 @@ def main():
         except:
             return default
 
-    re_check = get_arg("ReCheckMode", False, bool)
-    angle_tol = get_arg("AngleTolerance", 15, int)
-    min_score = get_arg("ThresholdMin", 0.1, float)
-    target_tag_name = str(args.get("TargetTag", "")).strip()
+    # 設定値の確定
+    re_check   = get_arg("ReCheckMode", False, bool)
+    angle_tol  = get_arg("AngleTolerance", 15, int)
+    min_score  = get_arg("ThresholdMin", 0.1, float)
+    target_tag = str(args.get("TargetTag", "")).strip()
 
-  # --- [main関数内の画像取得部分を以下に差し替え] ---
+    # --- 確定した設定をログに明示 (ここを追加) ---
+    log.info("==========================================")
+    log.info(f" [Config] ReCheckMode   : {re_check}")
+    log.info(f" [Config] AngleTolerance: {angle_tol}")
+    log.info(f" [Config] ThresholdMin  : {min_score}")
+    log.info(f" [Config] TargetTag     : '{target_tag if target_tag else '(None)'}'")
+    log.info("==========================================")
+
+    log.info(f"Mosaic Detector v2.1 [JST] starting...")
 
  # --- [main関数内の画像取得部分を以下に差し替え] ---
-
-    log.info(f"Mosaic Detector v2.0 [JST] starting... (Tol:{angle_tol}, Min:{min_score})")
 
     # タグ準備
     managed_names = ["NoMosaic"] + [f"Mosaic_{i:02d}" for i in range(1, 10)]
