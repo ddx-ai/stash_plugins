@@ -49,6 +49,7 @@ def is_mosaic(path, tolerance=15):
         angles = np.arctan2(np.abs(sobel_y), np.abs(sobel_x)) * 180 / np.pi
         mag = np.sqrt(sobel_x**2 + sobel_y**2)
 
+        # 角度許容誤差。0の場合は完全に垂直・水平のみ。
         mask = ((angles < tolerance) | (angles > 90 - tolerance))
         mag_filtered = np.where(mask, mag, 0)
 
@@ -92,8 +93,9 @@ def main():
     server = input_data.get("server_connection", {})
     if not server: return
     client = StashInterface(server)
+    args = input_data.get("args", {})
 
-    # --- 設定読み込み (修正版：0を許容し、インデントを統一) ---
+    # --- 設定読み込み (Bulk Scrape方式) ---
     try:
         config_all = client.get_configuration().get("plugins", {})
         plugin_settings = config_all.get("mosaic-detector", {})
@@ -102,8 +104,6 @@ def main():
 
     def get_val(key, default, type_func):
         val = plugin_settings.get(key)
-        # None または 空文字("") の場合のみデフォルトを返す
-        # 0 や False は有効な値として通す
         if val is None or (isinstance(val, str) and val == ""):
             return default
         try:
@@ -113,26 +113,24 @@ def main():
         except:
             return default
 
-    # --- ここから下の行のインデントを 'def get_val' の 'd' と揃える ---
     re_check   = get_val("ReCheckMode", False, bool)
     angle_tol  = get_val("AngleTolerance", 15, int)
     min_score  = get_val("ThresholdMin", 0.1, float)
     target_tag = str(plugin_settings.get("TargetTag", "")).strip()
 
-    # 確認用ログ
     log.info("==========================================")
     log.info(f" [Config] ReCheckMode   : {re_check}")
-    log.info(f" [Config] AngleTolerance: {angle_tol}") # ここが 0 になれば成功！
+    log.info(f" [Config] AngleTolerance: {angle_tol}")
     log.info(f" [Config] ThresholdMin  : {min_score}")
     log.info(f" [Config] TargetTag     : '{target_tag if target_tag else '(None)'}'")
     log.info("==========================================")
 
-    # タグIDのキャッシュ
+    # 管理タグIDのキャッシュ
     managed_names = ["NoMosaic"] + [f"Mosaic_{i:02d}" for i in range(1, 10)]
     tag_map = {name: str(client.find_tag(name, create=True)["id"]) for name in managed_names}
     managed_ids = list(tag_map.values())
 
-    # --- 高速GQLページネーション (全件ロード) ---
+    # --- 高速GQLページネーション (全件メタデータ取得) ---
     all_images = []
     cursor = 1
     page_size = 2000
@@ -142,7 +140,7 @@ def main():
         if t_tag:
             tag_filter = f', image_filter: {{ tags: {{ value: ["{t_tag["id"]}"], modifier: INCLUDES }} }}'
 
-    log.info("Fetching image list via GQL (Fast Load)...")
+    log.info("Fetching metadata records...")
     while True:
         query = """
         query FindImages($page: Int, $per_page: Int) {
@@ -162,12 +160,21 @@ def main():
         if len(all_images) >= data.get("count", 0): break
         cursor += 1
 
-    # --- 解析対象の選定 ---
+    # --- 解析対象の選定ロジック ---
+    target_ids = args.get("ids", [])
     targets = []
-    if re_check:
+
+    if target_ids:
+        # 1. 右クリック個別実行
+        log.info(f"Individual execution: Processing {len(target_ids)} selected images.")
+        id_set = set(str(tid) for tid in target_ids)
+        targets = [i for i in all_images if str(i["id"]) in id_set]
+    elif re_check:
+        # 2. 全件再スキャン
         log.info(f"ReCheckMode is ON: Targeting ALL {len(all_images)} images.")
         targets = all_images
     else:
+        # 3. 未判定のみ
         log.info("ReCheckMode is OFF: Targeting only untagged images.")
         for i in all_images:
             c_tids = [str(t["id"]) for t in i.get("tags", [])]
@@ -193,7 +200,7 @@ def main():
                 {"id": item["id"], "tags": final_tags}
             )
 
-        if count % 10 == 0 or score >= 0.5:
+        if count % 10 == 0 or score >= 0.5 or total <= 5:
              log.info(f"[{count}/{total}] {score:.3f} ({step}px) -> {tag_name} | {os.path.basename(path)}")
 
     log.info("--- Mosaic Detection Task Completed ---")
