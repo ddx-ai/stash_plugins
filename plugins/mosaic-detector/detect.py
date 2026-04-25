@@ -93,21 +93,19 @@ def main():
     if not server: return
     client = StashInterface(server)
 
-    # --- 設定読み込み (Bulk Scrape方式) ---
+    # --- 設定読み込み (修正版：0を許容し、インデントを統一) ---
     try:
         config_all = client.get_configuration().get("plugins", {})
         plugin_settings = config_all.get("mosaic-detector", {})
     except:
         plugin_settings = {}
 
-def get_val(key, default, type_func):
+    def get_val(key, default, type_func):
         val = plugin_settings.get(key)
-        
-        # 厳密な判定: None または 空文字の場合のみデフォルトを返す
-        # これにより、数値の 0 や 0.0 はそのまま通過する
-        if val is None or val == "": 
+        # None または 空文字("") の場合のみデフォルトを返す
+        # 0 や False は有効な値として通す
+        if val is None or (isinstance(val, str) and val == ""):
             return default
-            
         try:
             if type_func == bool:
                 return str(val).lower() in ("true", "1", "yes", "on")
@@ -115,14 +113,16 @@ def get_val(key, default, type_func):
         except:
             return default
 
+    # --- ここから下の行のインデントを 'def get_val' の 'd' と揃える ---
     re_check   = get_val("ReCheckMode", False, bool)
     angle_tol  = get_val("AngleTolerance", 15, int)
     min_score  = get_val("ThresholdMin", 0.1, float)
     target_tag = str(plugin_settings.get("TargetTag", "")).strip()
 
+    # 確認用ログ
     log.info("==========================================")
     log.info(f" [Config] ReCheckMode   : {re_check}")
-    log.info(f" [Config] AngleTolerance: {angle_tol}")
+    log.info(f" [Config] AngleTolerance: {angle_tol}") # ここが 0 になれば成功！
     log.info(f" [Config] ThresholdMin  : {min_score}")
     log.info(f" [Config] TargetTag     : '{target_tag if target_tag else '(None)'}'")
     log.info("==========================================")
