@@ -1,13 +1,12 @@
-name: Mosaic Detector
+name: mosaic-detector
 description: 勾配角度フィルタリング(v4.0)搭載・10段階モザイク判定
-version: 1.9
+version: 2.3
 url: https://github.com/ddx-ai/stash_plugins
 exec:
   - python
   - "{pluginDir}/detect.py"
 interface: raw
 
-# Stash UI設定画面の定義
 settings:
   ReCheckMode:
     displayName: 再チェックモード
