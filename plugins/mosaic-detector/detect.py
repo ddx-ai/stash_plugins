@@ -4,7 +4,7 @@ import os
 import cv2
 import numpy as np
 
-# --- Stashライブラリパスの解決 ---
+# --- パス解決 ---
 plugin_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(plugin_dir, ".."))
 
@@ -17,45 +17,29 @@ except ImportError:
         def error(self, m): sys.stderr.write(f"ERROR: {m}\n")
     log = FallbackLog()
 
-# --- 入力データ取得 ---
-try:
-    raw_input = sys.stdin.read()
-    json_input = json.loads(raw_input) if raw_input else {}
-except:
-    json_input = {}
-
-def is_mosaic(path):
+def is_mosaic(path, tolerance=15):
     """
-    勾配角度フィルタリング付き・縦横同期スキャン (v4.0)
-    斜線（鉛筆画・ハッチング）を排除し、純粋な水平・垂直グリッドのみを抽出
+    勾配角度フィルタリングを用いた周波数解析 (v4.0)
     """
     if not path or not os.path.exists(path): return 0, 0
     try:
         img = cv2.imread(path)
         if img is None: return 0, 0
-        
         h, w = img.shape[:2]
         target_size = 512
         scale = target_size / max(h, w)
         img_res = cv2.resize(img, (int(w * scale), int(h * scale)))
         gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY)
 
-        # 1. 勾配の強度と「角度」を算出
         sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
         sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        
-        # 角度(radian)を計算
         angles = np.arctan2(np.abs(sobel_y), np.abs(sobel_x)) * 180 / np.pi
         mag = np.sqrt(sobel_x**2 + sobel_y**2)
 
-        # 2. 角度によるフィルタリング
-        # 垂直(90度付近)または水平(0度付近)のエッジだけを残す
-        # 鉛筆画の斜線（30〜60度付近）はここでゼロになる
-        tolerance = 15 # 許容誤差±15度
+        # 角度フィルタ：0度(水平)・90度(垂直)付近以外のエッジ（斜線）をカット
         mask = ((angles < tolerance) | (angles > 90 - tolerance))
         mag_filtered = np.where(mask, mag, 0)
 
-        # 3. 投影（フィルタリング後の強度を使用）
         proj_x = np.sum(mag_filtered, axis=0)
         proj_y = np.sum(mag_filtered, axis=1)
 
@@ -70,95 +54,87 @@ def is_mosaic(path):
 
         if not scores_x or not scores_y: return 0, 0
 
-        max_combined_score = 0
+        max_combined = 0
         best_step = 0
         for step in range(8, 33):
             combined = scores_x[step] * scores_y[step]
-            if combined > max_combined_score:
-                max_combined_score = combined
+            if combined > max_combined:
+                max_combined = combined
                 best_step = step
-
-        final_score = round(np.sqrt(max_combined_score), 3)
-        return final_score, best_step
+        return round(np.sqrt(max_combined), 3), best_step
     except:
         return 0, 0
 
-def get_mosaic_tag_name(score):
-    """スコア 0.0〜1.0 を 01〜09 のタグに細分化"""
-    if score < 0.1: return "NoMosaic"
-    if score < 0.2: return "Mosaic_01"
-    if score < 0.3: return "Mosaic_02"
-    if score < 0.4: return "Mosaic_03"
-    if score < 0.5: return "Mosaic_04"
-    if score < 0.6: return "Mosaic_05"
-    if score < 0.7: return "Mosaic_06"
-    if score < 0.8: return "Mosaic_07"
-    if score < 0.9: return "Mosaic_08"
-    return "Mosaic_09" # 0.9以上は完全なグリッド
+def get_mosaic_tag_name(score, min_threshold):
+    if score < min_threshold: return "NoMosaic"
+    idx = int((score - 0.1) / 0.1) + 1
+    idx = min(max(idx, 1), 9)
+    return f"Mosaic_{idx:02d}"
 
 def main():
-    if "server_connection" not in json_input:
-        sys.stderr.write("ERROR: No server connection info\n")
+    # External Plugin API: JSONをstdinから読み込む
+    try:
+        input_data = json.loads(sys.stdin.read())
+    except:
         return
 
-    client = StashInterface(json_input["server_connection"])
-    log.info("Mosaic Detector: Ultra-Fine Gradient Mode (01-09) starting...")
+    # Stash本体への接続情報
+    server = input_data.get("server_connection", {})
+    if not server: return
+    client = StashInterface(server)
 
-    # 管理対象タグ：これらが付いている画像は「判定済み」とみなす
-    managed_tag_names = [
-        "NoMosaic", "Mosaic_01", "Mosaic_02", "Mosaic_03", "Mosaic_04", 
-        "Mosaic_05", "Mosaic_06", "Mosaic_07", "Mosaic_08", "Mosaic_09"
-    ]
-    tag_map = {name: str(client.find_tag(name, create=True)["id"]) for name in managed_tag_names}
+    # settings情報の取得 (External Plugin形式)
+    # Stash 0.31.x 以降、settingsは input_data["args"] に格納される
+    args = input_data.get("args", {})
+    re_check = args.get("ReCheckMode", False)
+    angle_tol = float(args.get("AngleTolerance", 15))
+    min_score = float(args.get("ThresholdMin", 0.1))
+    target_tag_name = args.get("TargetTag", "").strip()
+
+    log.info(f"Mosaic Detector v1.3 starting... [Tolerance: {angle_tol}]")
+
+    # タグ準備
+    managed_names = ["NoMosaic"] + [f"Mosaic_{i:02d}" for i in range(1, 10)]
+    tag_map = {name: str(client.find_tag(name, create=True)["id"]) for name in managed_names}
     managed_ids = list(tag_map.values())
 
-    # --- 画像取得 ---
-    query = "query { allImages { id files { path } tags { id } } }"
-    res = client.call_GQL(query)
+    # 画像取得（全件を一括取得）
+    res = client.call_GQL("query { allImages { id files { path } tags { id name } } }")
     all_images = res.get('allImages', [])
-
-    # 設定で再チェックモードがOFFなら、未判定分のみ処理
-    try:
-        full_config = client.get_configuration()
-        re_check = str(full_config.get("plugins", {}).get("mosaic-detector", {}).get("ReCheckMode", "false")).lower() == "true"
-    except:
-        re_check = False
 
     targets = []
     for i in all_images:
-        current_tids = [str(t["id"]) for t in i.get("tags", [])]
-        if re_check or not any(tid in managed_ids for tid in current_tids):
+        c_tags = i.get("tags", [])
+        c_tids = [str(t["id"]) for t in c_tags]
+        c_names = [t["name"] for t in c_tags]
+
+        if target_tag_name and target_tag_name not in c_names: continue
+        if re_check or not any(tid in managed_ids for tid in c_tids):
             targets.append(i)
 
     total = len(targets)
-    log.info(f"Target count: {total} images. Starting fine-grained analysis...")
+    log.info(f"Target count: {total} images.")
 
-    # --- 解析ループ ---
+    # ループ処理
     for count, item in enumerate(targets, 1):
         if not item.get("files"): continue
-        
-        img_id = item["id"]
         path = item["files"][0]["path"]
-        current_tids = [str(t["id"]) for t in item.get("tags", [])]
-
-        score, step = is_mosaic(path)
-        tag_name = get_mosaic_tag_name(score)
+        
+        score, step = is_mosaic(path, tolerance=angle_tol)
+        tag_name = get_mosaic_tag_name(score, min_score)
         new_tag_id = tag_map[tag_name]
 
-        # 既存の管理タグを除去して、新しい1つを付与
-        final_tags = [tid for tid in current_tids if tid not in managed_ids] + [new_tag_id]
+        current_tids = [str(t["id"]) for t in item.get("tags", [])]
+        
+        if new_tag_id not in current_tids:
+            final_tags = [tid for tid in current_tids if tid not in managed_ids] + [new_tag_id]
+            client.call_GQL("mutation Update($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }", 
+                            {"id": item["id"], "tags": final_tags})
 
-        if set(current_tids) != set(final_tags):
-            mutation = """
-            mutation Update($id: ID!, $tags: [ID!]) {
-              imageUpdate(input: { id: $id, tag_ids: $tags }) { id }
-            }
-            """
-            client.call_GQL(mutation, {"id": img_id, "tags": final_tags})
+        if count % 10 == 0 or score >= 0.5:
+             log.info(f"[{count}/{total}] {score:.3f} -> {tag_name} | {os.path.basename(path)}")
 
-        log.info(f"[{count}/{total}] score:{score:.3f} -> {tag_name} | {os.path.basename(path)}")
-
-    log.info("--- 10-Stage Analysis Completed ---")
+    log.info("Analysis completed successfully.")
 
 if __name__ == "__main__":
     main()
