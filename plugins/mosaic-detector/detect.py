@@ -116,54 +116,69 @@ def main():
 
   # --- [main関数内の画像取得部分を以下に差し替え] ---
 
-    log.info(f"Mosaic Detector v1.9 [JST] starting... (Tol:{angle_tol}, Min:{min_score})")
+ # --- [main関数内の画像取得部分を以下に差し替え] ---
 
-    # タグ準備 (前回同様)
+    log.info(f"Mosaic Detector v2.0 [JST] starting... (Tol:{angle_tol}, Min:{min_score})")
+
+    # タグ準備
     managed_names = ["NoMosaic"] + [f"Mosaic_{i:02d}" for i in range(1, 10)]
     tag_map = {name: str(client.find_tag(name, create=True)["id"]) for name in managed_names}
     managed_ids = list(tag_map.values())
 
-    # --- 12万枚を小分けに全件取得するロジック ---
+    # --- 高速GQLページネーション (12万枚対応) ---
     all_images = []
-    page = 1
-    page_size = 1000 # 1000枚ずつ取得
+    cursor = 1
+    page_size = 2000
+    
+    log.info("Fetching image list via GQL (Fast Load)...")
+    
+    # ターゲットタグがある場合のフィルタ文字列作成
+    tag_filter = ""
+    if target_tag_name:
+        t_tag = client.find_tag(target_tag_name)
+        if t_tag:
+            tag_filter = f', image_filter: {{ tags: {{ value: ["{t_tag["id"]}"], modifier: INCLUDES }} }}'
 
-    log.info("Fetching image list from Stash...")
     while True:
-        # findImagesを使用してページネーション
-        find_filter = {"per_page": page_size, "page": page}
-        # TargetTagがある場合はフィルタに追加
-        if target_tag_name:
-             find_filter["tags"] = {"modifier": "INCLUDES", "value": [client.find_tag(target_tag_name)["id"]]}
+        query = """
+        query FindImages($page: Int, $per_page: Int) {
+          findImages(filter: { page: $page, per_page: $per_page } %s) {
+            count
+            images {
+              id
+              files { path }
+              tags { id }
+            }
+          }
+        }
+        """ % tag_filter
         
-        result = client.find_images(image_filter=find_filter)
-        images = result[0] if isinstance(result, tuple) else result # バージョンによる戻り値差異吸収
-        count_in_page = len(images)
+        result = client.call_GQL(query, {"page": cursor, "per_page": page_size})
+        data = result.get("findImages", {})
+        images = data.get("images", [])
         
-        if count_in_page == 0:
+        if not images:
             break
             
         all_images.extend(images)
-        if len(all_images) % 5000 == 0:
-            log.info(f"Loaded {len(all_images)} metadata records...")
-        page += 1
-
-    log.info(f"Stash returned {len(all_images)} total images.")
+        if len(all_images) % 10000 == 0 or len(all_images) == data.get("count"):
+             log.info(f"Loaded {len(all_images)} / {data.get('count')} records...")
+        
+        if len(all_images) >= data.get("count", 0):
+            break
+        cursor += 1
 
     # 解析対象の選定
     targets = []
     for i in all_images:
-        c_tags = i.get("tags", [])
-        c_tids = [str(t["id"]) for t in c_tags]
-
-        # ReCheckModeがオンなら全件、オフなら未判定のみ
+        c_tids = [str(t["id"]) for t in i.get("tags", [])]
         if re_check or not any(tid in managed_ids for tid in c_tids):
             targets.append(i)
 
     total = len(targets)
     log.info(f"Analysis Target: {total} images.")
     
-    # --- [以下、解析ループ処理は前回と同じ] ---
+    # --- [以下、解析ループ処理へ続く] ---
 
     for count, item in enumerate(targets, 1):
         if not item.get("files"): continue
