@@ -97,11 +97,20 @@ def main():
     if not server: return
     client = StashInterface(server)
 
-# --- UI設定のパース ---
-    args = input_data.get("args", {})
-    def get_arg(key, default, type_func):
-        val = args.get(key)
-        if val is None or val == "": return default
+# --- [main関数内の設定パース部分を以下に差し替え] ---
+
+    # Stash本体からプラグイン設定を直接取得 (Bulk Scrape方式)
+    try:
+        config_all = client.get_configuration().get("plugins", {})
+        # mosaic-detector は yml の name と一致させる必要があります
+        plugin_settings = config_all.get("mosaic-detector", {})
+    except:
+        plugin_settings = {}
+
+    # 値の取得と型変換のヘルパー
+    def get_val(key, default, type_func):
+        val = plugin_settings.get(key, default)
+        if val is None: return default
         try:
             if type_func == bool:
                 return str(val).lower() in ("true", "1", "yes", "on")
@@ -110,12 +119,12 @@ def main():
             return default
 
     # 設定値の確定
-    re_check   = get_arg("ReCheckMode", False, bool)
-    angle_tol  = get_arg("AngleTolerance", 15, int)
-    min_score  = get_arg("ThresholdMin", 0.1, float)
-    target_tag = str(args.get("TargetTag", "")).strip()
+    re_check   = get_val("ReCheckMode", False, bool)
+    angle_tol  = get_val("AngleTolerance", 15, int)
+    min_score  = get_val("ThresholdMin", 0.1, float)
+    target_tag = str(plugin_settings.get("TargetTag", "")).strip()
 
-    # --- 確定した設定をログに明示 (ここを追加) ---
+    # --- 確認ログ出力 ---
     log.info("==========================================")
     log.info(f" [Config] ReCheckMode   : {re_check}")
     log.info(f" [Config] AngleTolerance: {angle_tol}")
@@ -123,7 +132,7 @@ def main():
     log.info(f" [Config] TargetTag     : '{target_tag if target_tag else '(None)'}'")
     log.info("==========================================")
 
-    log.info(f"Mosaic Detector v2.1 [JST] starting...")
+    log.info(f"Mosaic Detector v2.3 [JST] starting...")
 
  # --- [main関数内の画像取得部分を以下に差し替え] ---
 
