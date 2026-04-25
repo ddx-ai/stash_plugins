@@ -100,9 +100,14 @@ def main():
     except:
         plugin_settings = {}
 
-    def get_val(key, default, type_func):
-        val = plugin_settings.get(key, default)
-        if val is None: return default
+def get_val(key, default, type_func):
+        val = plugin_settings.get(key)
+        
+        # 厳密な判定: None または 空文字の場合のみデフォルトを返す
+        # これにより、数値の 0 や 0.0 はそのまま通過する
+        if val is None or val == "": 
+            return default
+            
         try:
             if type_func == bool:
                 return str(val).lower() in ("true", "1", "yes", "on")
