@@ -3,8 +3,15 @@ import json
 import os
 import cv2
 import numpy as np
+import time
+from datetime import datetime
 
-# --- Stashライブラリパスの解決 ---
+# --- タイムゾーン設定 (JST) ---
+os.environ['TZ'] = 'Asia/Tokyo'
+if hasattr(time, 'tzset'):
+    time.tzset()
+
+# --- Stashライブラリパス解決 ---
 plugin_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(plugin_dir, ".."))
 
@@ -13,14 +20,18 @@ try:
     import stashapi.log as log
 except ImportError:
     class FallbackLog:
-        def info(self, m): sys.stderr.write(f"INFO: {m}\n")
-        def error(self, m): sys.stderr.write(f"ERROR: {m}\n")
+        def info(self, m):
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            sys.stderr.write(f"INFO[{now}] {m}\n")
+        def error(self, m):
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            sys.stderr.write(f"ERRO[{now}] {m}\n")
     log = FallbackLog()
 
 def is_mosaic(path, tolerance=15):
     """
     勾配角度フィルタリングを用いた周波数解析 (v4.0)
-    斜線を排除し、正方形グリッドのみを 0.0-1.0 でスコア化
+    斜線（鉛筆画等）を排除し、正方形グリッドのみをスコア化
     """
     if not path or not os.path.exists(path): return 0, 0
     try:
@@ -39,7 +50,7 @@ def is_mosaic(path, tolerance=15):
         angles = np.arctan2(np.abs(sobel_y), np.abs(sobel_x)) * 180 / np.pi
         mag = np.sqrt(sobel_x**2 + sobel_y**2)
 
-        # 角度フィルタリング（鉛筆画・斜線排除）
+        # 角度フィルタ：0度・90度付近以外のエッジ（斜線）をカット
         mask = ((angles < tolerance) | (angles > 90 - tolerance))
         mag_filtered = np.where(mask, mag, 0)
 
@@ -65,34 +76,29 @@ def is_mosaic(path, tolerance=15):
                 max_combined = combined
                 best_step = step
         
-        # 最終スコア算出
         return round(np.sqrt(max_combined), 3), best_step
-    except Exception as e:
+    except Exception:
         return 0, 0
 
 def get_mosaic_tag_name(score, min_threshold):
-    """スコアに基づき Mosaic_01〜09 へのマッピング"""
+    """スコア 0.1〜1.0 を 9段階にマッピング"""
     if score < min_threshold: return "NoMosaic"
-    # 0.1〜1.0 の範囲を 9分割
     idx = int((score - 0.1) / 0.1) + 1
     idx = min(max(idx, 1), 9)
     return f"Mosaic_{idx:02d}"
 
 def main():
-    # External Plugin API: JSONを標準入力から取得
     try:
         input_data = json.loads(sys.stdin.read())
     except Exception:
         return
 
-    # 接続情報取得
     server = input_data.get("server_connection", {})
     if not server: return
     client = StashInterface(server)
 
-    # UI設定のパース（String Map形式からの安全な型変換）
+    # UI設定のパース
     args = input_data.get("args", {})
-    
     def get_arg(key, default, type_func):
         val = args.get(key)
         if val is None or val == "": return default
@@ -104,22 +110,21 @@ def main():
             return default
 
     re_check = get_arg("ReCheckMode", False, bool)
-    angle_tol = get_arg("AngleTolerance", 15.0, float)
+    angle_tol = get_arg("AngleTolerance", 15, int)
     min_score = get_arg("ThresholdMin", 0.1, float)
     target_tag_name = str(args.get("TargetTag", "")).strip()
 
-    log.info(f"Mosaic Detector v1.4 starting... [Tol:{angle_tol}, Min:{min_score}]")
+    log.info(f"Mosaic Detector v1.9 [JST] starting... (Tol:{angle_tol}, Min:{min_score})")
 
-    # 管理用タグの準備
+    # タグ準備
     managed_names = ["NoMosaic"] + [f"Mosaic_{i:02d}" for i in range(1, 10)]
     tag_map = {name: str(client.find_tag(name, create=True)["id"]) for name in managed_names}
     managed_ids = list(tag_map.values())
 
-    # 全画像の基本情報を取得
+    # 画像取得
     res = client.call_GQL("query { allImages { id files { path } tags { id name } } }")
     all_images = res.get('allImages', [])
 
-    # 解析対象の選定
     targets = []
     for i in all_images:
         c_tags = i.get("tags", [])
@@ -131,9 +136,8 @@ def main():
             targets.append(i)
 
     total = len(targets)
-    log.info(f"Targets identified: {total} images.")
+    log.info(f"Analysis Target: {total} images.")
 
-    # 解析実行ループ
     for count, item in enumerate(targets, 1):
         if not item.get("files"): continue
         path = item["files"][0]["path"]
@@ -144,20 +148,18 @@ def main():
 
         current_tids = [str(t["id"]) for t in item.get("tags", [])]
         
-        # タグに変更が必要な場合のみ更新
         if new_tag_id not in current_tids:
-            # 既存の管理タグを除去し、新しい判定タグを追加
             final_tags = [tid for tid in current_tids if tid not in managed_ids] + [new_tag_id]
             client.call_GQL(
                 "mutation Update($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }",
                 {"id": item["id"], "tags": final_tags}
             )
 
-        # 進行状況の表示（10件ごと、または高スコア時）
+        # 10件ごと、または高スコア時にJSTログ出力
         if count % 10 == 0 or score >= 0.5:
              log.info(f"[{count}/{total}] {score:.3f} ({step}px) -> {tag_name} | {os.path.basename(path)}")
 
-    log.info("Mosaic Detection Task completed.")
+    log.info("--- Mosaic Detection Task Successfully Completed ---")
 
 if __name__ == "__main__":
     main()
