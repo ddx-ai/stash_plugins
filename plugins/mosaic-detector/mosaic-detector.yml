@@ -1,34 +1,35 @@
 name: Mosaic Detector
 description: 勾配角度フィルタリング(v4.0)搭載・10段階モザイク判定
-version: 1.5
+version: 1.6
 url: https://github.com/ddx-ai/stash_plugins
 exec:
   - python
   - "{pluginDir}/detect.py"
 interface: raw
 
-# 公式ドキュメントの構造に従ったMap形式の定義
+# Stashの内部構造体に最も適合する形式
+# defaultValue ではなく default を使い、値はすべて引用符で囲みます
 settings:
   ReCheckMode:
     type: Boolean
     displayName: 再チェックモード
-    defaultValue: false
-    description: 既に判定済みタグ（Mosaic_XX）がある画像も再計算します。
+    default: "false"
+    description: 既に判定済みタグがある画像も再計算します。
   AngleTolerance:
     type: Number
     displayName: 角度許容誤差 (1-45)
-    defaultValue: 15
+    default: "15"
     description: 斜線を排除する厳格さ。15前後を推奨。
   ThresholdMin:
     type: Number
     displayName: 判定開始しきい値 (0.0-1.0)
-    defaultValue: 0.1
+    default: "0.1"
     description: Mosaic_01として判定を開始する最小スコア。
   TargetTag:
     type: String
     displayName: 対象タグ限定
-    defaultValue: ""
-    description: 特定のタグを持つ画像のみを解析対象にする場合、そのタグ名を入力。
+    default: ""
+    description: 特定のタグを持つ画像のみを対象にする場合に入力。
 
 tasks:
   - name: Mosaic Detection
