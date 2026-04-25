@@ -31,7 +31,7 @@ except ImportError:
 def is_mosaic(path, tolerance=15):
     """
     勾配角度フィルタリングを用いた周波数解析 (v4.0)
-    斜線（鉛筆画等）を排除し、正方形グリッドのみをスコア化
+    斜線を排除し、正方形グリッドのみをスコア化
     """
     if not path or not os.path.exists(path): return 0, 0
     try:
@@ -44,13 +44,11 @@ def is_mosaic(path, tolerance=15):
         img_res = cv2.resize(img, (int(w * scale), int(h * scale)))
         gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY)
 
-        # 勾配算出
         sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
         sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
         angles = np.arctan2(np.abs(sobel_y), np.abs(sobel_x)) * 180 / np.pi
         mag = np.sqrt(sobel_x**2 + sobel_y**2)
 
-        # 角度フィルタ：0度・90度付近以外のエッジ（斜線）をカット
         mask = ((angles < tolerance) | (angles > 90 - tolerance))
         mag_filtered = np.where(mask, mag, 0)
 
@@ -65,7 +63,6 @@ def is_mosaic(path, tolerance=15):
 
         scores_x = get_period_map(proj_x)
         scores_y = get_period_map(proj_y)
-
         if not scores_x or not scores_y: return 0, 0
 
         max_combined = 0
@@ -81,7 +78,6 @@ def is_mosaic(path, tolerance=15):
         return 0, 0
 
 def get_mosaic_tag_name(score, min_threshold):
-    """スコア 0.1〜1.0 を 9段階にマッピング"""
     if score < min_threshold: return "NoMosaic"
     idx = int((score - 0.1) / 0.1) + 1
     idx = min(max(idx, 1), 9)
@@ -97,17 +93,13 @@ def main():
     if not server: return
     client = StashInterface(server)
 
-# --- [main関数内の設定パース部分を以下に差し替え] ---
-
-    # Stash本体からプラグイン設定を直接取得 (Bulk Scrape方式)
+    # --- 設定読み込み (Bulk Scrape方式) ---
     try:
         config_all = client.get_configuration().get("plugins", {})
-        # mosaic-detector は yml の name と一致させる必要があります
         plugin_settings = config_all.get("mosaic-detector", {})
     except:
         plugin_settings = {}
 
-    # 値の取得と型変換のヘルパー
     def get_val(key, default, type_func):
         val = plugin_settings.get(key, default)
         if val is None: return default
@@ -118,13 +110,11 @@ def main():
         except:
             return default
 
-    # 設定値の確定
     re_check   = get_val("ReCheckMode", False, bool)
     angle_tol  = get_val("AngleTolerance", 15, int)
     min_score  = get_val("ThresholdMin", 0.1, float)
     target_tag = str(plugin_settings.get("TargetTag", "")).strip()
 
-    # --- 確認ログ出力 ---
     log.info("==========================================")
     log.info(f" [Config] ReCheckMode   : {re_check}")
     log.info(f" [Config] AngleTolerance: {angle_tol}")
@@ -132,65 +122,48 @@ def main():
     log.info(f" [Config] TargetTag     : '{target_tag if target_tag else '(None)'}'")
     log.info("==========================================")
 
-    log.info(f"Mosaic Detector v2.3 [JST] starting...")
-
- # --- [main関数内の画像取得部分を以下に差し替え] ---
-
-    # タグ準備
+    # タグIDのキャッシュ
     managed_names = ["NoMosaic"] + [f"Mosaic_{i:02d}" for i in range(1, 10)]
     tag_map = {name: str(client.find_tag(name, create=True)["id"]) for name in managed_names}
     managed_ids = list(tag_map.values())
 
-    # --- 高速GQLページネーション (12万枚対応) ---
+    # --- 高速GQLページネーション (全件ロード) ---
     all_images = []
     cursor = 1
     page_size = 2000
-    
-    log.info("Fetching image list via GQL (Fast Load)...")
-    
-    # ターゲットタグがある場合のフィルタ文字列作成
     tag_filter = ""
-    if target_tag_name:
-        t_tag = client.find_tag(target_tag_name)
+    if target_tag:
+        t_tag = client.find_tag(target_tag)
         if t_tag:
             tag_filter = f', image_filter: {{ tags: {{ value: ["{t_tag["id"]}"], modifier: INCLUDES }} }}'
 
+    log.info("Fetching image list via GQL (Fast Load)...")
     while True:
         query = """
         query FindImages($page: Int, $per_page: Int) {
           findImages(filter: { page: $page, per_page: $per_page } %s) {
             count
-            images {
-              id
-              files { path }
-              tags { id }
-            }
+            images { id files { path } tags { id } }
           }
         }
         """ % tag_filter
-        
         result = client.call_GQL(query, {"page": cursor, "per_page": page_size})
         data = result.get("findImages", {})
         images = data.get("images", [])
-        
-        if not images:
-            break
-            
+        if not images: break
         all_images.extend(images)
         if len(all_images) % 10000 == 0 or len(all_images) == data.get("count"):
              log.info(f"Loaded {len(all_images)} / {data.get('count')} records...")
-        
-        if len(all_images) >= data.get("count", 0):
-            break
+        if len(all_images) >= data.get("count", 0): break
         cursor += 1
 
-# --- 対象選定の修正：再チェックONなら無条件で全件追加 ---
+    # --- 解析対象の選定 ---
     targets = []
     if re_check:
-        # 再チェックONなら、APIで取れた全ての画像を対象にする
+        log.info(f"ReCheckMode is ON: Targeting ALL {len(all_images)} images.")
         targets = all_images
     else:
-        # オフの場合は、まだ管理タグが付いていないものだけ
+        log.info("ReCheckMode is OFF: Targeting only untagged images.")
         for i in all_images:
             c_tids = [str(t["id"]) for t in i.get("tags", [])]
             if not any(tid in managed_ids for tid in c_tids):
@@ -198,17 +171,14 @@ def main():
 
     total = len(targets)
     log.info(f"Analysis Target: {total} images.")
-    
-    # --- [以下、解析ループ処理へ続く] ---
 
+    # --- 解析実行 ---
     for count, item in enumerate(targets, 1):
         if not item.get("files"): continue
         path = item["files"][0]["path"]
-        
         score, step = is_mosaic(path, tolerance=angle_tol)
         tag_name = get_mosaic_tag_name(score, min_score)
         new_tag_id = tag_map[tag_name]
-
         current_tids = [str(t["id"]) for t in item.get("tags", [])]
         
         if new_tag_id not in current_tids:
@@ -218,11 +188,10 @@ def main():
                 {"id": item["id"], "tags": final_tags}
             )
 
-        # 10件ごと、または高スコア時にJSTログ出力
         if count % 10 == 0 or score >= 0.5:
              log.info(f"[{count}/{total}] {score:.3f} ({step}px) -> {tag_name} | {os.path.basename(path)}")
 
-    log.info("--- Mosaic Detection Task Successfully Completed ---")
+    log.info("--- Mosaic Detection Task Completed ---")
 
 if __name__ == "__main__":
     main()
