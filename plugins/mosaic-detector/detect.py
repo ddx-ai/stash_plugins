@@ -114,29 +114,56 @@ def main():
     min_score = get_arg("ThresholdMin", 0.1, float)
     target_tag_name = str(args.get("TargetTag", "")).strip()
 
+  # --- [main関数内の画像取得部分を以下に差し替え] ---
+
     log.info(f"Mosaic Detector v1.9 [JST] starting... (Tol:{angle_tol}, Min:{min_score})")
 
-    # タグ準備
+    # タグ準備 (前回同様)
     managed_names = ["NoMosaic"] + [f"Mosaic_{i:02d}" for i in range(1, 10)]
     tag_map = {name: str(client.find_tag(name, create=True)["id"]) for name in managed_names}
     managed_ids = list(tag_map.values())
 
-    # 画像取得
-    res = client.call_GQL("query { allImages { id files { path } tags { id name } } }")
-    all_images = res.get('allImages', [])
+    # --- 12万枚を小分けに全件取得するロジック ---
+    all_images = []
+    page = 1
+    page_size = 1000 # 1000枚ずつ取得
 
+    log.info("Fetching image list from Stash...")
+    while True:
+        # findImagesを使用してページネーション
+        find_filter = {"per_page": page_size, "page": page}
+        # TargetTagがある場合はフィルタに追加
+        if target_tag_name:
+             find_filter["tags"] = {"modifier": "INCLUDES", "value": [client.find_tag(target_tag_name)["id"]]}
+        
+        result = client.find_images(image_filter=find_filter)
+        images = result[0] if isinstance(result, tuple) else result # バージョンによる戻り値差異吸収
+        count_in_page = len(images)
+        
+        if count_in_page == 0:
+            break
+            
+        all_images.extend(images)
+        if len(all_images) % 5000 == 0:
+            log.info(f"Loaded {len(all_images)} metadata records...")
+        page += 1
+
+    log.info(f"Stash returned {len(all_images)} total images.")
+
+    # 解析対象の選定
     targets = []
     for i in all_images:
         c_tags = i.get("tags", [])
         c_tids = [str(t["id"]) for t in c_tags]
-        c_names = [t["name"] for t in c_tags]
 
-        if target_tag_name and target_tag_name not in c_names: continue
+        # ReCheckModeがオンなら全件、オフなら未判定のみ
         if re_check or not any(tid in managed_ids for tid in c_tids):
             targets.append(i)
 
     total = len(targets)
     log.info(f"Analysis Target: {total} images.")
+    
+    # --- [以下、解析ループ処理は前回と同じ] ---
 
     for count, item in enumerate(targets, 1):
         if not item.get("files"): continue
