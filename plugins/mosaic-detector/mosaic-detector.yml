@@ -7,24 +7,24 @@ exec:
   - "{pluginDir}/detect.py"
 interface: raw
 
-# 外部プラグイン設定（Stashの設定 > プラグイン > Mosaic Detector に表示されます）
+# 外部プラグイン設定（Stashのドキュメントに準拠したMap形式）
 settings:
-  - name: ReCheckMode
+  ReCheckMode:
     label: 再チェックモード
     type: Boolean
     default: false
     description: 既に判定済みタグ（Mosaic_XX）がある画像も再計算します。
-  - name: AngleTolerance
+  AngleTolerance:
     label: 角度許容誤差 (1-45)
     type: Number
     default: 15
     description: 斜線を排除する厳格さ。小さいほど厳格になります（推奨：15）。
-  - name: ThresholdMin
+  ThresholdMin:
     label: 判定開始しきい値 (0.0-1.0)
     type: Number
     default: 0.1
     description: Mosaic_01として判定を開始する最小スコア。
-  - name: TargetTag
+  TargetTag:
     label: 対象タグ限定
     type: String
     default: ""
