@@ -1,6 +1,6 @@
 name: mosaic-detector
 description: 勾配角度フィルタリング(v4.0)搭載・10段階モザイク判定
-version: 2.3
+version: 2.5
 url: https://github.com/ddx-ai/stash_plugins
 exec:
   - python
@@ -13,7 +13,7 @@ settings:
     type: BOOLEAN
   
   AngleTolerance:
-    displayName: 角度許容誤差 (1-45)
+    displayName: 角度許容誤差 (0-45)
     type: NUMBER
 
   ThresholdMin:
@@ -27,3 +27,11 @@ settings:
 tasks:
   - name: Mosaic Detection
     description: ライブラリ内の画像を解析し、01〜09のタグを多段階で付与します。
+
+actionGroups:
+  - name: Mosaic Detector Actions
+    applicableTo: [IMAGES]
+    actions:
+      - name: 個別モザイク解析
+        description: 選択した画像のみを現在の設定で解析します
+        taskName: Mosaic Detection
