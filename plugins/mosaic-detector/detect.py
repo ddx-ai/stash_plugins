@@ -168,12 +168,17 @@ def main():
             break
         cursor += 1
 
-    # 解析対象の選定
+# --- 対象選定の修正：再チェックONなら無条件で全件追加 ---
     targets = []
-    for i in all_images:
-        c_tids = [str(t["id"]) for t in i.get("tags", [])]
-        if re_check or not any(tid in managed_ids for tid in c_tids):
-            targets.append(i)
+    if re_check:
+        # 再チェックONなら、APIで取れた全ての画像を対象にする
+        targets = all_images
+    else:
+        # オフの場合は、まだ管理タグが付いていないものだけ
+        for i in all_images:
+            c_tids = [str(t["id"]) for t in i.get("tags", [])]
+            if not any(tid in managed_ids for tid in c_tids):
+                targets.append(i)
 
     total = len(targets)
     log.info(f"Analysis Target: {total} images.")
