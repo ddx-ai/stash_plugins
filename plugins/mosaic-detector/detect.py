@@ -32,12 +32,10 @@ def is_mosaic(path, tolerance=1):
         h, w = img.shape[:2]
 
         # --- 1024px 高精細解析ロジック ---
-        # 1024px以下なら原寸、それ以上なら1024pxにリサイズして詳細を保持
         if max(h, w) <= 1024:
             img_res = img 
         else:
-            target_size = 1024
-            scale = target_size / max(h, w)
+            scale = 1024 / max(h, w)
             img_res = cv2.resize(img, (int(w * scale), int(h * scale)))
         
         gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY)
@@ -48,7 +46,7 @@ def is_mosaic(path, tolerance=1):
         angles = np.arctan2(np.abs(sobel_y), np.abs(sobel_x)) * 180 / np.pi
         mag = np.sqrt(sobel_x**2 + sobel_y**2)
 
-        # 角度フィルタ (1度以内の垂直・水平のみ)
+        # 角度フィルタ (設定値: 1 または 2 を推奨)
         mask = ((angles < tolerance) | (angles > 90 - tolerance))
         mag_filtered = np.where(mask, mag, 0)
 
@@ -59,9 +57,8 @@ def is_mosaic(path, tolerance=1):
             p_min, p_max = np.min(proj), np.max(proj)
             if p_max - p_min < 1e-5: return {}
             norm_proj = (proj - p_min) / (p_max - p_min)
-            # 1024px化に伴い、検知する周期の範囲も調整が必要な場合がありますが
-            # まずは従来の8〜32px（モザイクとして一般的なサイズ）で維持します
-            return {step: np.mean(norm_proj[::step]) for step in range(8, 33)}
+            # 1024pxに合わせて 8px〜80px まで幅広くチェック
+            return {step: np.mean(norm_proj[::step]) for step in range(8, 81)}
 
         scores_x = get_period_map(proj_x)
         scores_y = get_period_map(proj_y)
@@ -71,25 +68,24 @@ def is_mosaic(path, tolerance=1):
         best_step = 0
         all_scores = []
         
-        for step in range(8, 33):
-            combined = scores_x[step] * scores_y[step]
+        for step in range(8, 81):
+            combined = scores_x.get(step, 0) * scores_y.get(step, 0)
             all_scores.append(combined)
             if combined > max_combined:
                 max_combined = combined
                 best_step = step
 
-        # --- 鮮鋭度バリデーション (1024px版) ---
+        # --- 鮮鋭度バリデーション (誤検知キラー) ---
         if max_combined > 0:
             avg_score = np.mean(all_scores)
             sharpness = max_combined / (avg_score + 1e-6)
             
-            # 高解像度化によりノイズも鮮明になるため、鮮鋭度判定は厳しめに維持
-            if sharpness < 5.0:
-                max_combined *= 0.2
+            # 鮮鋭度が低い（画面全体の網掛けノイズ等）場合はスコアを大幅減衰
+            if sharpness < 3.0:
+                max_combined *= 0.3
 
         return round(np.sqrt(max_combined), 3), best_step
-    except Exception:
-        return 0, 0
+    except: return 0, 0
 
 def get_mosaic_tag_name(score, min_threshold):
     if score < min_threshold: return "NoMosaic"
@@ -101,7 +97,6 @@ def main():
         input_data = json.loads(sys.stdin.read())
     except: return
     client = StashInterface(input_data.get("server_connection", {}))
-    args = input_data.get("args", {})
 
     try:
         config_all = client.get_configuration().get("plugins", {})
@@ -117,11 +112,11 @@ def main():
         except: return default
 
     re_check = get_val("ReCheckMode", False, bool)
-    angle_tol = get_val("AngleTolerance", 15, int)
+    angle_tol = get_val("AngleTolerance", 1, int) # デフォルトを1に
     min_score = get_val("ThresholdMin", 0.1, float)
     target_tag = str(plugin_settings.get("TargetTag", "")).strip()
 
-    log.info(f"--- Config: ReCheck={re_check}, Angle={angle_tol}, Min={min_score} ---")
+    log.info(f"--- 1024px Logic: ReCheck={re_check}, Angle={angle_tol}, Min={min_score} ---")
 
     managed_names = ["NoMosaic"] + [f"Mosaic_{i:02d}" for i in range(1, 10)]
     tag_map = {name: str(client.find_tag(name, create=True)["id"]) for name in managed_names}
@@ -155,11 +150,13 @@ def main():
         tag_name = get_mosaic_tag_name(score, min_score)
         new_tag_id = tag_map[tag_name]
         current_tids = [str(t["id"]) for t in item.get("tags", [])]
+        
         if new_tag_id not in current_tids:
             final_tags = [tid for tid in current_tids if tid not in managed_ids] + [new_tag_id]
             client.call_GQL("mutation Update($id: ID!, $tags: [ID!]) { imageUpdate(input: { id: $id, tag_ids: $tags }) { id } }", {"id": item["id"], "tags": final_tags})
+        
         if count % 20 == 0 or score >= 0.5:
-            log.info(f"[{count}/{total}] {score:.3f} -> {tag_name}")
+            log.info(f"[{count}/{total}] {score:.3f} ({step}px) -> {tag_name}")
 
 if __name__ == "__main__":
     main()
