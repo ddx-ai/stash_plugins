@@ -1,6 +1,6 @@
 name: mosaic-detector
-description: 勾配角度フィルタリング(v4.0)搭載・10段階モザイク判定
-version: 2.8
+description: 1024px広域スキャン(v5.0)・10段階モザイク判定
+version: 3.0
 url: https://github.com/ddx-ai/stash_plugins
 exec:
   - python
