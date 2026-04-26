@@ -24,22 +24,34 @@ except ImportError:
         def error(self, m): sys.stderr.write(f"ERRO {m}\n")
     log = FallbackLog()
 
-def is_mosaic(path, tolerance=15):
+def is_mosaic(path, tolerance=1):
     if not path or not os.path.exists(path): return 0, 0
     try:
         img = cv2.imread(path)
         if img is None: return 0, 0
         h, w = img.shape[:2]
-        target_size = 512
-        scale = target_size / max(h, w)
-        img_res = cv2.resize(img, (int(w * scale), int(h * scale)))
+
+        # --- 1024px 高精細解析ロジック ---
+        # 1024px以下なら原寸、それ以上なら1024pxにリサイズして詳細を保持
+        if max(h, w) <= 1024:
+            img_res = img 
+        else:
+            target_size = 1024
+            scale = target_size / max(h, w)
+            img_res = cv2.resize(img, (int(w * scale), int(h * scale)))
+        
         gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY)
+        
+        # 勾配抽出
         sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
         sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
         angles = np.arctan2(np.abs(sobel_y), np.abs(sobel_x)) * 180 / np.pi
         mag = np.sqrt(sobel_x**2 + sobel_y**2)
+
+        # 角度フィルタ (1度以内の垂直・水平のみ)
         mask = ((angles < tolerance) | (angles > 90 - tolerance))
         mag_filtered = np.where(mask, mag, 0)
+
         proj_x = np.sum(mag_filtered, axis=0)
         proj_y = np.sum(mag_filtered, axis=1)
 
@@ -47,19 +59,37 @@ def is_mosaic(path, tolerance=15):
             p_min, p_max = np.min(proj), np.max(proj)
             if p_max - p_min < 1e-5: return {}
             norm_proj = (proj - p_min) / (p_max - p_min)
+            # 1024px化に伴い、検知する周期の範囲も調整が必要な場合がありますが
+            # まずは従来の8〜32px（モザイクとして一般的なサイズ）で維持します
             return {step: np.mean(norm_proj[::step]) for step in range(8, 33)}
 
         scores_x = get_period_map(proj_x)
         scores_y = get_period_map(proj_y)
         if not scores_x or not scores_y: return 0, 0
+
         max_combined = 0
         best_step = 0
+        all_scores = []
+        
         for step in range(8, 33):
             combined = scores_x[step] * scores_y[step]
+            all_scores.append(combined)
             if combined > max_combined:
-                max_combined, best_step = combined, step
+                max_combined = combined
+                best_step = step
+
+        # --- 鮮鋭度バリデーション (1024px版) ---
+        if max_combined > 0:
+            avg_score = np.mean(all_scores)
+            sharpness = max_combined / (avg_score + 1e-6)
+            
+            # 高解像度化によりノイズも鮮明になるため、鮮鋭度判定は厳しめに維持
+            if sharpness < 5.0:
+                max_combined *= 0.2
+
         return round(np.sqrt(max_combined), 3), best_step
-    except: return 0, 0
+    except Exception:
+        return 0, 0
 
 def get_mosaic_tag_name(score, min_threshold):
     if score < min_threshold: return "NoMosaic"
