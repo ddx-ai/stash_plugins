@@ -1,5 +1,6 @@
 ## Stash用プラグイン
 Stash用プラグインのリポジトリです。
+https://ddx-ai.github.io/stash_plugins/main/index.yml
 
 このテンプレートから作成。
 https://github.com/stashapp/plugins-repo-template
